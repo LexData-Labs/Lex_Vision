@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { FileText, Search, Filter, Download, Calendar, User, Camera, AlertTriangle } from "lucide-react";
+import { api, AttendanceRecord } from "@/services/api";
 
 interface LogEntry {
   id: string;
@@ -23,55 +24,53 @@ export default function Logs() {
   const [levelFilter, setLevelFilter] = useState<string>("all");
   const [categoryFilter, setCategoryFilter] = useState<string>("all");
 
-  // Mock data for demonstration
+  // Fetch real attendance data from backend and convert to logs
   useEffect(() => {
-    const mockLogs: LogEntry[] = [
-      {
-        id: "1",
-        timestamp: new Date().toISOString(),
-        level: "success",
-        category: "face_recognition",
-        message: "Face recognized: John Doe (95% confidence)",
-        userId: "john.doe@company.com",
-        details: "Camera 1 detected and recognized employee John Doe"
-      },
-      {
-        id: "2",
-        timestamp: new Date(Date.now() - 30000).toISOString(),
-        level: "warning",
-        category: "camera",
-        message: "Camera 2 connection unstable",
-        details: "Network latency increased to 150ms"
-      },
-      {
-        id: "3",
-        timestamp: new Date(Date.now() - 60000).toISOString(),
-        level: "info",
-        category: "system",
-        message: "System backup completed successfully",
-        details: "Daily backup to cloud storage completed"
-      },
-      {
-        id: "4",
-        timestamp: new Date(Date.now() - 90000).toISOString(),
-        level: "error",
-        category: "security",
-        message: "Unauthorized access attempt detected",
-        userId: "unknown",
-        details: "Failed login attempt from IP 192.168.1.100"
-      },
-      {
-        id: "5",
-        timestamp: new Date(Date.now() - 120000).toISOString(),
-        level: "success",
-        category: "user",
-        message: "User login successful",
-        userId: "admin@company.com",
-        details: "Administrator logged in from 192.168.1.50"
+    const fetchLogs = async () => {
+      try {
+        const attendanceData = await api.attendance();
+        
+        // Convert attendance records to log entries
+        const logEntries: LogEntry[] = attendanceData.map((record: AttendanceRecord, index: number) => {
+          const isRecognized = record.name && record.name !== "Unknown";
+          const entryTypeText = record.entry_type ? ` (${record.entry_type === "entry" ? "Entry" : "Exit"})` : "";
+          const cameraText = record.camera_id ? ` via ${record.camera_id}` : "";
+
+          return {
+            id: `${record.employee_id}-${record.timestamp}-${index}`,
+            timestamp: record.timestamp,
+            level: isRecognized ? "success" : "warning",
+            category: "face_recognition",
+            message: isRecognized
+              ? `Face recognized: ${record.name}${entryTypeText}`
+              : `Unknown face detected${entryTypeText}`,
+            userId: record.employee_id,
+            details: isRecognized
+              ? `Employee ${record.name} (ID: ${record.employee_id}) detected${entryTypeText}${cameraText}`
+              : `Unrecognized person detected${entryTypeText}${cameraText} at ${new Date(record.timestamp).toLocaleString()}`
+          };
+        });
+        
+        // Sort by timestamp (newest first)
+        logEntries.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+        
+        setLogs(logEntries);
+        setFilteredLogs(logEntries);
+      } catch (error) {
+        console.error('Failed to fetch logs:', error);
+        // If fetch fails, show empty logs instead of mock data
+        setLogs([]);
+        setFilteredLogs([]);
       }
-    ];
-    setLogs(mockLogs);
-    setFilteredLogs(mockLogs);
+    };
+
+    // Fetch logs initially
+    fetchLogs();
+    
+    // Set up polling for real-time updates (every 3 seconds)
+    const interval = setInterval(fetchLogs, 3000);
+    
+    return () => clearInterval(interval);
   }, []);
 
   useEffect(() => {

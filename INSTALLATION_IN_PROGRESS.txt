@@ -1,0 +1,18 @@
+INSTALLATION IN PROGRESS
+========================
+
+The Python dependencies are currently being installed.
+
+Current Status:
+---------------
+✅ Virtual environment created
+🔄 Installing dependencies (dlib is currently compiling)
+
+The dlib library (used for face recognition) needs to be compiled from source
+on Windows, which can take 5-15 minutes depending on your system.
+
+Please be patient. The installation will complete automatically.
+
+You can monitor progress by checking for new output from the pip install command.
+
+Once complete, the frontend dependencies will be installed next.

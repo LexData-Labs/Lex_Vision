@@ -25,8 +25,8 @@ export function DetectionLogs() {
           name: a.name || 'Unknown Person',
           personId: a.employee_id || undefined,
           confidence: 100,
-          type: 'entry',
-          location: 'Camera 0',
+          type: (a.entry_type || 'entry') as 'entry' | 'exit',
+          location: a.camera_id || 'Camera 0',
           timestamp: new Date(a.timestamp),
         }));
         const history = faceDetectionService.getDetectionHistory();
@@ -52,8 +52,8 @@ export function DetectionLogs() {
           name: a.name || 'Unknown Person',
           personId: a.employee_id || undefined,
           confidence: 100,
-          type: 'entry',
-          location: 'Camera 0',
+          type: (a.entry_type || 'entry') as 'entry' | 'exit',
+          location: a.camera_id || 'Camera 0',
           timestamp: new Date(a.timestamp),
         }));
         const history = faceDetectionService.getDetectionHistory();

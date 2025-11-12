@@ -4,20 +4,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { AlertTriangle, Bell, CheckCircle, XCircle, Clock, User, Camera, Shield } from "lucide-react";
-
-interface Alert {
-  id: string;
-  title: string;
-  description: string;
-  severity: "low" | "medium" | "high" | "critical";
-  category: "security" | "face_recognition" | "camera" | "system" | "user";
-  status: "active" | "acknowledged" | "resolved";
-  timestamp: string;
-  acknowledgedBy?: string;
-  acknowledgedAt?: string;
-  location?: string;
-  cameraId?: string;
-}
+import { api, Alert } from "@/services/api";
 
 export default function Alerts() {
   const [alerts, setAlerts] = useState<Alert[]>([]);
@@ -26,70 +13,29 @@ export default function Alerts() {
   const [statusFilter, setStatusFilter] = useState<string>("all");
   const [categoryFilter, setCategoryFilter] = useState<string>("all");
 
-  // Mock data for demonstration
+  // Fetch real alerts from backend
   useEffect(() => {
-    const mockAlerts: Alert[] = [
-      {
-        id: "1",
-        title: "Unauthorized Access Attempt",
-        description: "Multiple failed login attempts detected from suspicious IP address",
-        severity: "high",
-        category: "security",
-        status: "active",
-        timestamp: new Date().toISOString(),
-        location: "Main Entrance",
-        cameraId: "CAM-001"
-      },
-      {
-        id: "2",
-        title: "Unknown Face Detected",
-        description: "Unrecognized individual detected in restricted area",
-        severity: "medium",
-        category: "face_recognition",
-        status: "active",
-        timestamp: new Date(Date.now() - 30000).toISOString(),
-        location: "Server Room",
-        cameraId: "CAM-003"
-      },
-      {
-        id: "3",
-        title: "Camera Offline",
-        description: "Camera 2 has been offline for more than 5 minutes",
-        severity: "medium",
-        category: "camera",
-        status: "acknowledged",
-        timestamp: new Date(Date.now() - 60000).toISOString(),
-        acknowledgedBy: "admin@company.com",
-        acknowledgedAt: new Date(Date.now() - 30000).toISOString(),
-        location: "Parking Lot",
-        cameraId: "CAM-002"
-      },
-      {
-        id: "4",
-        title: "System Performance Degradation",
-        description: "Face recognition processing time increased by 200%",
-        severity: "low",
-        category: "system",
-        status: "resolved",
-        timestamp: new Date(Date.now() - 90000).toISOString(),
-        location: "System",
-        acknowledgedBy: "admin@company.com",
-        acknowledgedAt: new Date(Date.now() - 60000).toISOString()
-      },
-      {
-        id: "5",
-        title: "Multiple Failed Face Recognition",
-        description: "Camera 1 experiencing high rate of failed face recognition attempts",
-        severity: "critical",
-        category: "face_recognition",
-        status: "active",
-        timestamp: new Date(Date.now() - 120000).toISOString(),
-        location: "Main Lobby",
-        cameraId: "CAM-001"
+    const fetchAlerts = async () => {
+      try {
+        const alertsData = await api.alerts();
+        console.log('Fetched alerts:', alertsData);
+        setAlerts(alertsData);
+        setFilteredAlerts(alertsData);
+      } catch (error) {
+        console.error('Failed to fetch alerts:', error);
+        // Keep empty array on error
+        setAlerts([]);
+        setFilteredAlerts([]);
       }
-    ];
-    setAlerts(mockAlerts);
-    setFilteredAlerts(mockAlerts);
+    };
+
+    // Fetch initially
+    fetchAlerts();
+
+    // Poll for new alerts every 5 seconds
+    const interval = setInterval(fetchAlerts, 5000);
+
+    return () => clearInterval(interval);
   }, []);
 
   useEffect(() => {
@@ -158,20 +104,32 @@ export default function Alerts() {
     }
   };
 
-  const acknowledgeAlert = (alertId: string) => {
-    setAlerts(prev => prev.map(alert => 
-      alert.id === alertId 
-        ? { ...alert, status: "acknowledged", acknowledgedBy: "admin@company.com", acknowledgedAt: new Date().toISOString() }
-        : alert
-    ));
+  const acknowledgeAlert = async (alertId: string) => {
+    try {
+      await api.updateAlert(alertId, "acknowledged", "admin@company.com");
+      // Update local state
+      setAlerts(prev => prev.map(alert =>
+        alert.id === alertId
+          ? { ...alert, status: "acknowledged" as const, acknowledgedBy: "admin@company.com", acknowledgedAt: new Date().toISOString() }
+          : alert
+      ));
+    } catch (error) {
+      console.error('Failed to acknowledge alert:', error);
+    }
   };
 
-  const resolveAlert = (alertId: string) => {
-    setAlerts(prev => prev.map(alert => 
-      alert.id === alertId 
-        ? { ...alert, status: "resolved" }
-        : alert
-    ));
+  const resolveAlert = async (alertId: string) => {
+    try {
+      await api.updateAlert(alertId, "resolved");
+      // Update local state
+      setAlerts(prev => prev.map(alert =>
+        alert.id === alertId
+          ? { ...alert, status: "resolved" as const }
+          : alert
+      ));
+    } catch (error) {
+      console.error('Failed to resolve alert:', error);
+    }
   };
 
   const getActiveAlertsCount = () => alerts.filter(alert => alert.status === "active").length;

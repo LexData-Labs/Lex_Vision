@@ -6,7 +6,8 @@ import { Badge } from "@/components/ui/badge";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { Label } from "@/components/ui/label";
-import { Users, UserPlus, Search, Filter, Edit, Trash2, Shield, User, Camera, Settings } from "lucide-react";
+import { Users as UsersIcon, UserPlus, Search, Filter, Edit, Trash2, Shield, User, Camera, Settings } from "lucide-react";
+import { api } from "@/services/api";
 
 interface User {
   id: string;
@@ -28,75 +29,69 @@ export default function Users() {
   const [roleFilter, setRoleFilter] = useState<string>("all");
   const [statusFilter, setStatusFilter] = useState<string>("all");
   const [isAddUserOpen, setIsAddUserOpen] = useState(false);
+  const [isEditUserOpen, setIsEditUserOpen] = useState(false);
   const [editingUser, setEditingUser] = useState<User | null>(null);
+  
+  // Form state for Add/Edit User
+  const [formData, setFormData] = useState({
+    username: "",
+    email: "",
+    role: "employee" as "administrator" | "employee" | "viewer",
+    department: "",
+  });
+  // Add Employee form (backend requires id and name)
+  const [newEmployee, setNewEmployee] = useState({ id: "", name: "" });
+  const [newEmployeeFile, setNewEmployeeFile] = useState<File | null>(null);
 
-  // Mock data for demonstration
+  // Load employees from backend (no mock users)
   useEffect(() => {
-    const mockUsers: User[] = [
-      {
-        id: "1",
-        username: "admin",
-        email: "admin@company.com",
-        role: "administrator",
-        status: "active",
-        lastLogin: new Date().toISOString(),
-        createdAt: new Date(Date.now() - 86400000 * 30).toISOString(),
-        permissions: ["all"],
-        department: "IT",
-        faceRegistered: true
-      },
-      {
-        id: "2",
-        username: "john.doe",
-        email: "john.doe@company.com",
-        role: "employee",
-        status: "active",
-        lastLogin: new Date(Date.now() - 3600000).toISOString(),
-        createdAt: new Date(Date.now() - 86400000 * 15).toISOString(),
-        permissions: ["view_cameras", "view_logs"],
-        department: "Engineering",
-        faceRegistered: true
-      },
-      {
-        id: "3",
-        username: "jane.smith",
-        email: "jane.smith@company.com",
-        role: "employee",
-        status: "active",
-        lastLogin: new Date(Date.now() - 7200000).toISOString(),
-        createdAt: new Date(Date.now() - 86400000 * 20).toISOString(),
-        permissions: ["view_cameras", "view_logs"],
-        department: "Marketing",
-        faceRegistered: false
-      },
-      {
-        id: "4",
-        username: "bob.wilson",
-        email: "bob.wilson@company.com",
-        role: "viewer",
-        status: "inactive",
-        lastLogin: new Date(Date.now() - 86400000 * 7).toISOString(),
-        createdAt: new Date(Date.now() - 86400000 * 45).toISOString(),
-        permissions: ["view_cameras"],
-        department: "Security",
-        faceRegistered: true
-      },
-      {
-        id: "5",
-        username: "alice.johnson",
-        email: "alice.johnson@company.com",
-        role: "employee",
-        status: "suspended",
-        lastLogin: new Date(Date.now() - 86400000 * 3).toISOString(),
-        createdAt: new Date(Date.now() - 86400000 * 10).toISOString(),
-        permissions: ["view_cameras"],
-        department: "HR",
-        faceRegistered: false
+    const loadEmployees = async () => {
+      try {
+        const employees = await api.employees();
+        // Map minimal backend employee -> UI User with sensible defaults
+        const mapped: User[] = employees.map((e) => ({
+          id: e.id,
+          username: e.name || e.id,
+          email: "",
+          role: "employee",
+          status: "active",
+          createdAt: new Date().toISOString(),
+          permissions: [],
+          department: undefined,
+          faceRegistered: false,
+        }));
+        setUsers(mapped);
+        setFilteredUsers(mapped);
+      } catch {
+        // On failure, show empty list (no mock data)
+        setUsers([]);
+        setFilteredUsers([]);
       }
-    ];
-    setUsers(mockUsers);
-    setFilteredUsers(mockUsers);
+    };
+    loadEmployees();
   }, []);
+
+  const syncFromFaces = async () => {
+    try {
+      await api.reloadEmployees();
+      const employees = await api.employees();
+      const mapped: User[] = employees.map((e) => ({
+        id: e.id,
+        username: e.name || e.id,
+        email: "",
+        role: "employee",
+        status: "active",
+        createdAt: new Date().toISOString(),
+        permissions: [],
+        department: undefined,
+        faceRegistered: false,
+      }));
+      setUsers(mapped);
+      setFilteredUsers(mapped);
+    } catch {
+      alert("Failed to sync employees from faces");
+    }
+  };
 
   useEffect(() => {
     let filtered = users;
@@ -174,7 +169,76 @@ export default function Users() {
   };
 
   const deleteUser = (userId: string) => {
-    setUsers(prev => prev.filter(user => user.id !== userId));
+    if (window.confirm("Are you sure you want to delete this user?")) {
+      setUsers(prev => prev.filter(user => user.id !== userId));
+    }
+  };
+
+  const handleAddUser = async () => {
+    if (!newEmployee.id || !newEmployee.name || !newEmployeeFile) {
+      alert("Please provide Employee ID, Name, and a face image");
+      return;
+    }
+    try {
+      await api.uploadEmployee({ id: newEmployee.id, name: newEmployee.name, file: newEmployeeFile });
+      // Reload employees from backend
+      const employees = await api.employees();
+      const mapped: User[] = employees.map((e) => ({
+        id: e.id,
+        username: e.name || e.id,
+        email: "",
+        role: "employee",
+        status: "active",
+        createdAt: new Date().toISOString(),
+        permissions: [],
+        department: undefined,
+        faceRegistered: false,
+      }));
+      setUsers(mapped);
+      setFilteredUsers(mapped);
+      setNewEmployee({ id: "", name: "" });
+      setNewEmployeeFile(null);
+      setIsAddUserOpen(false);
+    } catch (e) {
+      alert((e as Error).message || "Failed to add employee");
+    }
+  };
+
+  const handleEditUser = () => {
+    if (!editingUser || !formData.username || !formData.email) {
+      alert("Please fill in all required fields");
+      return;
+    }
+
+    setUsers(prev =>
+      prev.map(user =>
+        user.id === editingUser.id
+          ? {
+              ...user,
+              username: formData.username,
+              email: formData.email,
+              role: formData.role,
+              department: formData.department || undefined,
+              permissions: formData.role === "administrator" ? ["all"] : ["view_cameras", "view_logs"],
+            }
+          : user
+      )
+    );
+
+    setFormData({ username: "", email: "", role: "employee", department: "" });
+    setEditingUser(null);
+    setIsEditUserOpen(false);
+  };
+
+  const openEditDialog = (user: User) => {
+    setEditingUser(user);
+    setFormData({
+      username: user.username,
+      email: user.email,
+      role: user.role,
+      department: user.department || "",
+    });
+    setIsEditUserOpen(true);
   };
 
   const getActiveUsersCount = () => users.filter(user => user.status === "active").length;
@@ -199,44 +263,53 @@ export default function Users() {
           </DialogTrigger>
           <DialogContent>
             <DialogHeader>
-              <DialogTitle>Add New User</DialogTitle>
+              <DialogTitle>Add New Employee</DialogTitle>
               <DialogDescription>
-                Create a new user account with appropriate permissions
+                Create a new employee in the system (ID and Name are required)
               </DialogDescription>
             </DialogHeader>
             <div className="grid gap-4 py-4">
               <div className="grid grid-cols-4 items-center gap-4">
-                <Label htmlFor="username" className="text-right">Username</Label>
-                <Input id="username" className="col-span-3" />
+                <Label htmlFor="emp-id" className="text-right">Employee ID</Label>
+                <Input id="emp-id" className="col-span-3" value={newEmployee.id} onChange={(e) => setNewEmployee({ ...newEmployee, id: e.target.value })} placeholder="e.g. 800001" />
               </div>
               <div className="grid grid-cols-4 items-center gap-4">
-                <Label htmlFor="email" className="text-right">Email</Label>
-                <Input id="email" type="email" className="col-span-3" />
+                <Label htmlFor="emp-name" className="text-right">Name</Label>
+                <Input id="emp-name" className="col-span-3" value={newEmployee.name} onChange={(e) => setNewEmployee({ ...newEmployee, name: e.target.value })} placeholder="e.g. John Doe" />
               </div>
               <div className="grid grid-cols-4 items-center gap-4">
-                <Label htmlFor="role" className="text-right">Role</Label>
-                <Select>
-                  <SelectTrigger className="col-span-3">
-                    <SelectValue placeholder="Select role" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="administrator">Administrator</SelectItem>
-                    <SelectItem value="employee">Employee</SelectItem>
-                    <SelectItem value="viewer">Viewer</SelectItem>
-                  </SelectContent>
-                </Select>
+                <Label htmlFor="emp-file" className="text-right">Face Image</Label>
+                <Input
+                  id="emp-file"
+                  type="file"
+                  accept="image/*"
+                  className="col-span-3"
+                  onChange={(e) => {
+                    const file = e.target.files?.[0] || null;
+                    setNewEmployeeFile(file);
+                  }}
+                />
               </div>
             </div>
             <DialogFooter>
-              <Button variant="outline" onClick={() => setIsAddUserOpen(false)}>
+              <Button
+                variant="outline"
+                onClick={() => {
+                  setIsAddUserOpen(false);
+                  setNewEmployee({ id: "", name: "" });
+                }}
+              >
                 Cancel
               </Button>
-              <Button onClick={() => setIsAddUserOpen(false)}>
-                Add User
+              <Button onClick={handleAddUser}>
+                Add Employee
               </Button>
             </DialogFooter>
           </DialogContent>
         </Dialog>
+        <Button variant="outline" onClick={syncFromFaces}>
+          Sync from Faces
+        </Button>
       </div>
 
       {/* Statistics Cards */}
@@ -245,7 +318,7 @@ export default function Users() {
           <CardContent className="pt-6">
             <div className="flex items-center gap-2">
               <div className="w-8 h-8 bg-blue-100 rounded-lg flex items-center justify-center">
-                <Users className="h-4 w-4 text-blue-600" />
+                <UsersIcon className="h-4 w-4 text-blue-600" />
               </div>
               <div>
                 <p className="text-2xl font-bold">{users.length}</p>
@@ -404,7 +477,7 @@ export default function Users() {
                   <Button
                     size="sm"
                     variant="outline"
-                    onClick={() => setEditingUser(user)}
+                    onClick={() => openEditDialog(user)}
                   >
                     <Edit className="h-4 w-4" />
                   </Button>
@@ -440,7 +513,7 @@ export default function Users() {
             
             {filteredUsers.length === 0 && (
               <div className="text-center py-8 text-muted-foreground">
-                <Users className="h-12 w-12 mx-auto mb-4 opacity-50" />
+                <UsersIcon className="h-12 w-12 mx-auto mb-4 opacity-50" />
                 <p className="text-lg font-medium">No users found</p>
                 <p className="text-sm">Try adjusting your filters or search terms</p>
               </div>
@@ -448,6 +521,82 @@ export default function Users() {
           </div>
         </CardContent>
       </Card>
+
+      {/* Edit User Dialog */}
+      <Dialog open={isEditUserOpen} onOpenChange={setIsEditUserOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Edit User</DialogTitle>
+            <DialogDescription>
+              Update user information and permissions
+            </DialogDescription>
+          </DialogHeader>
+          <div className="grid gap-4 py-4">
+            <div className="grid grid-cols-4 items-center gap-4">
+              <Label htmlFor="edit-username" className="text-right">Username</Label>
+              <Input
+                id="edit-username"
+                className="col-span-3"
+                value={formData.username}
+                onChange={(e) => setFormData({ ...formData, username: e.target.value })}
+                placeholder="Enter username"
+              />
+            </div>
+            <div className="grid grid-cols-4 items-center gap-4">
+              <Label htmlFor="edit-email" className="text-right">Email</Label>
+              <Input
+                id="edit-email"
+                type="email"
+                className="col-span-3"
+                value={formData.email}
+                onChange={(e) => setFormData({ ...formData, email: e.target.value })}
+                placeholder="Enter email"
+              />
+            </div>
+            <div className="grid grid-cols-4 items-center gap-4">
+              <Label htmlFor="edit-role" className="text-right">Role</Label>
+              <Select
+                value={formData.role}
+                onValueChange={(value) => setFormData({ ...formData, role: value as any })}
+              >
+                <SelectTrigger className="col-span-3">
+                  <SelectValue placeholder="Select role" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="administrator">Administrator</SelectItem>
+                  <SelectItem value="employee">Employee</SelectItem>
+                  <SelectItem value="viewer">Viewer</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="grid grid-cols-4 items-center gap-4">
+              <Label htmlFor="edit-department" className="text-right">Department</Label>
+              <Input
+                id="edit-department"
+                className="col-span-3"
+                value={formData.department}
+                onChange={(e) => setFormData({ ...formData, department: e.target.value })}
+                placeholder="Enter department (optional)"
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => {
+                setIsEditUserOpen(false);
+                setEditingUser(null);
+                setFormData({ username: "", email: "", role: "employee", department: "" });
+              }}
+            >
+              Cancel
+            </Button>
+            <Button onClick={handleEditUser}>
+              Save Changes
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

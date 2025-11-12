@@ -1,4 +1,21 @@
-const API_BASE = (import.meta as any).env.VITE_API_BASE || "http://localhost:8000";
+// Derive API base:
+// - Use VITE_API_BASE if provided
+// - Else use current hostname with port 8000 for non-localhost access
+// - Fallback to localhost:8000
+const deriveApiBase = () => {
+  const envBase = (import.meta as any).env.VITE_API_BASE as string | undefined;
+  if (envBase) return envBase;
+  try {
+    const hostname = (window as any)?.location?.hostname;
+    if (hostname && hostname !== "localhost" && hostname !== "127.0.0.1") {
+      return `http://${hostname}:8000`;
+    }
+  } catch {
+    // ignore if window is not available
+  }
+  return "http://localhost:8000";
+};
+const API_BASE = deriveApiBase();
 
 export interface LoginRequest {
   username: string;
@@ -15,6 +32,29 @@ export interface AttendanceRecord {
   employee_id: string;
   name: string;
   timestamp: string; // ISO string
+  camera_id?: string;
+  entry_type?: "entry" | "exit" | null;
+}
+
+export interface Alert {
+  id: string;
+  title: string;
+  description: string;
+  severity: "low" | "medium" | "high" | "critical";
+  category: "security" | "face_recognition" | "camera" | "system" | "user";
+  status: "active" | "acknowledged" | "resolved";
+  timestamp: string;
+  acknowledgedBy?: string;
+  acknowledgedAt?: string;
+  location?: string;
+  cameraId?: string;
+}
+
+export interface CameraConfig {
+  id: string;
+  name: string;
+  role: "entry" | "exit" | "none";
+  status: "online" | "offline";
 }
 
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
@@ -26,14 +66,28 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
     ...options,
   });
   if (!res.ok) {
-    const text = await res.text();
-    throw new Error(text || `Request failed: ${res.status}`);
+    const contentType = res.headers.get("content-type") || "";
+    let detail = "";
+    if (contentType.includes("application/json")) {
+      try {
+        const body = await res.json();
+        detail = body?.detail || JSON.stringify(body);
+      } catch {
+        // ignore
+      }
+    } else {
+      try {
+        detail = await res.text();
+      } catch {
+        // ignore
+      }
+    }
+    throw new Error(detail || `Request failed: ${res.status}`);
   }
   const contentType = res.headers.get("content-type") || "";
   if (contentType.includes("application/json")) {
     return (await res.json()) as T;
   }
-  // @ts-expect-error allow non-json types
   return undefined as T;
 }
 
@@ -50,7 +104,61 @@ export const api = {
       body: JSON.stringify(rec),
     }),
   employees: () => request<{ id: string; name: string }[]>("/employees"),
+  createEmployee: (emp: { id: string; name: string }) =>
+    request<{ id: string; name: string }>("/employees", {
+      method: "POST",
+      body: JSON.stringify(emp),
+    }),
+  reloadEmployees: () => request<{ status: string; count: number }>("/employees/reload", { method: "POST" }),
+  uploadEmployee: async (data: { id: string; name: string; file: File }) => {
+    const formData = new FormData();
+    formData.append("id", data.id);
+    formData.append("name", data.name);
+    formData.append("image", data.file, data.file.name);
+    const res = await fetch(`${API_BASE}/employees/upload`, {
+      method: "POST",
+      body: formData,
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(text || `Upload failed: ${res.status}`);
+    }
+    return (await res.json()) as { id: string; name: string };
+  },
   health: () => request<{ status: string; camera_index: number; conf_threshold: number; cors_origins: string[] }>("/health"),
+
+  // Alerts API
+  alerts: () => request<Alert[]>("/alerts"),
+  createAlert: (alert: Alert) =>
+    request<Alert>("/alerts", {
+      method: "POST",
+      body: JSON.stringify(alert),
+    }),
+  updateAlert: (alertId: string, status: string, acknowledgedBy?: string) => {
+    const params = new URLSearchParams();
+    if (status) params.append("status_update", status);
+    if (acknowledgedBy) params.append("acknowledged_by", acknowledgedBy);
+    return request<Alert>(`/alerts/${alertId}?${params.toString()}`, {
+      method: "PATCH",
+    });
+  },
+
+  // Camera API
+  cameras: () => request<CameraConfig[]>("/cameras"),
+  discoverCameras: () => request<{ cameras: Array<{ index: number; id: string; name: string; available: boolean }> }>("/cameras/discover"),
+  updateCamera: (cameraId: string, role: string) => {
+    const params = new URLSearchParams();
+    if (role) params.append("role", role);
+    return request<CameraConfig>(`/cameras/${cameraId}?${params.toString()}`, {
+      method: "PATCH",
+    });
+  },
+  getVideoFeedUrl: (cameraIndex?: number) => {
+    if (cameraIndex !== undefined) {
+      return `${API_BASE}/video_feed/${cameraIndex}`;
+    }
+    return `${API_BASE}/video_feed`;
+  },
 };
 
 export { API_BASE };
