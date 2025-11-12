@@ -204,30 +204,40 @@ export default function Users() {
     }
   };
 
-  const handleEditUser = () => {
-    if (!editingUser || !formData.username || !formData.email) {
-      alert("Please fill in all required fields");
+  const handleEditUser = async () => {
+    if (!editingUser || !formData.username) {
+      alert("Please enter a name");
       return;
     }
 
-    setUsers(prev =>
-      prev.map(user =>
-        user.id === editingUser.id
-          ? {
-              ...user,
-              username: formData.username,
-              email: formData.email,
-              role: formData.role,
-              department: formData.department || undefined,
-              permissions: formData.role === "administrator" ? ["all"] : ["view_cameras", "view_logs"],
-            }
-          : user
-      )
-    );
+    try {
+      // Update employee name in backend - this will update all previous attendance logs
+      await api.updateEmployee(editingUser.id, formData.username);
 
-    setFormData({ username: "", email: "", role: "employee", department: "" });
-    setEditingUser(null);
-    setIsEditUserOpen(false);
+      // Update local state
+      setUsers(prev =>
+        prev.map(user =>
+          user.id === editingUser.id
+            ? {
+                ...user,
+                username: formData.username,
+                email: formData.email,
+                role: formData.role,
+                department: formData.department || undefined,
+                permissions: formData.role === "administrator" ? ["all"] : ["view_cameras", "view_logs"],
+              }
+            : user
+        )
+      );
+
+      alert("Employee name updated! All previous logs now show the new name.");
+      setFormData({ username: "", email: "", role: "employee", department: "" });
+      setEditingUser(null);
+      setIsEditUserOpen(false);
+    } catch (error) {
+      console.error("Failed to update employee:", error);
+      alert("Failed to update employee name. Please try again.");
+    }
   };
 
   const openEditDialog = (user: User) => {

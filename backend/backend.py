@@ -50,6 +50,10 @@ import threading
 from collections import defaultdict
 from queue import Queue
 
+# Database
+import sqlite3
+import json
+
 # GPU monitoring (optional)
 try:
     import GPUtil
@@ -59,6 +63,121 @@ try:
     import psutil
 except ImportError:
     psutil = None
+
+# ============================================================================
+# DATABASE FUNCTIONS
+# ============================================================================
+
+def get_db_connection():
+    """Get database connection"""
+    db_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'data', 'lex_vision.db')
+    os.makedirs(os.path.dirname(db_path), exist_ok=True)
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row  # Return rows as dictionaries
+    return conn
+
+def init_database():
+    """Initialize database tables"""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    # Employees table - stores employee info
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS employees (
+            employee_id TEXT PRIMARY KEY,
+            name TEXT NOT NULL
+        )
+    ''')
+
+    # Attendance table - only stores employee_id reference
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS attendance (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            employee_id TEXT NOT NULL,
+            timestamp TEXT NOT NULL,
+            camera_id TEXT,
+            entry_type TEXT,
+            FOREIGN KEY (employee_id) REFERENCES employees(employee_id)
+        )
+    ''')
+
+    # Cameras table
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS cameras (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            role TEXT NOT NULL,
+            status TEXT NOT NULL
+        )
+    ''')
+
+    # Alerts table
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS alerts (
+            id TEXT PRIMARY KEY,
+            title TEXT NOT NULL,
+            description TEXT NOT NULL,
+            severity TEXT NOT NULL,
+            category TEXT NOT NULL,
+            status TEXT NOT NULL,
+            timestamp TEXT NOT NULL,
+            acknowledged_by TEXT,
+            acknowledged_at TEXT,
+            location TEXT,
+            camera_id TEXT
+        )
+    ''')
+
+    conn.commit()
+    conn.close()
+    print("✅ Database initialized")
+
+def save_attendance_to_db(record: 'AttendanceRecord'):
+    """Save attendance record to database"""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        # Ensure employee exists in employees table
+        cursor.execute('INSERT OR IGNORE INTO employees (employee_id, name) VALUES (?, ?)',
+                      (record.employee_id, record.name))
+
+        # Save attendance (only employee_id reference)
+        cursor.execute('''
+            INSERT INTO attendance (employee_id, timestamp, camera_id, entry_type)
+            VALUES (?, ?, ?, ?)
+        ''', (record.employee_id, record.timestamp, record.camera_id, record.entry_type))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"Error saving attendance to database: {e}")
+
+def save_camera_to_db(camera: 'CameraConfig'):
+    """Save or update camera configuration in database"""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT OR REPLACE INTO cameras (id, name, role, status)
+            VALUES (?, ?, ?, ?)
+        ''', (camera.id, camera.name, camera.role, camera.status))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"Error saving camera to database: {e}")
+
+def load_cameras_from_db():
+    """Load camera configurations from database"""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute('SELECT id, name, role, status FROM cameras')
+        rows = cursor.fetchall()
+        conn.close()
+        return {row['id']: {'id': row['id'], 'name': row['name'], 'role': row['role'], 'status': row['status']} for row in rows}
+    except Exception as e:
+        print(f"Error loading cameras from database: {e}")
+        return {}
 
 # ============================================================================
 # UTILITY FUNCTIONS
@@ -701,6 +820,16 @@ def _load_employees_from_data():
             # Insert if not present
             if emp_id not in _employees:
                 _employees[emp_id] = Employee(id=emp_id, name=name)
+                # Also save to database
+                try:
+                    conn = get_db_connection()
+                    cursor = conn.cursor()
+                    cursor.execute('INSERT OR IGNORE INTO employees (employee_id, name) VALUES (?, ?)',
+                                  (emp_id, name))
+                    conn.commit()
+                    conn.close()
+                except Exception as e:
+                    print(f"Warning: Failed to save employee {emp_id} to database: {e}")
                 added += 1
         if added:
             print(f"Loaded {added} employees from data/employee_faces")
@@ -721,14 +850,52 @@ async def login(credentials: LoginRequest):
 # Employee CRUD
 @app.get("/employees", response_model=List[Employee])
 async def list_employees():
-    return list(_employees.values())
+    """Get all employees from database"""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('SELECT employee_id, name FROM employees ORDER BY name')
+    rows = cursor.fetchall()
+    conn.close()
+    return [Employee(id=row['employee_id'], name=row['name']) for row in rows]
 
 @app.post("/employees", response_model=Employee, status_code=status.HTTP_201_CREATED)
 async def create_employee(emp: Employee):
-    if emp.id in _employees:
+    """Create new employee in database"""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute('INSERT INTO employees (employee_id, name) VALUES (?, ?)',
+                      (emp.id, emp.name))
+        conn.commit()
+        conn.close()
+        _employees[emp.id] = emp  # Also update in-memory cache
+        return emp
+    except sqlite3.IntegrityError:
+        conn.close()
         raise HTTPException(status_code=400, detail="Employee already exists")
-    _employees[emp.id] = emp
-    return emp
+
+@app.patch("/employees/{employee_id}")
+async def update_employee(employee_id: str, name: str = None):
+    """Update employee name - all previous logs will show new name"""
+    if not name:
+        raise HTTPException(status_code=400, detail="Name is required")
+
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('UPDATE employees SET name = ? WHERE employee_id = ?', (name, employee_id))
+
+    if cursor.rowcount == 0:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Employee not found")
+
+    conn.commit()
+    conn.close()
+
+    # Update in-memory cache
+    if employee_id in _employees:
+        _employees[employee_id].name = name
+
+    return {"employee_id": employee_id, "name": name, "message": "Employee name updated successfully"}
 
 @app.post("/employees/upload", response_model=Employee, status_code=status.HTTP_201_CREATED)
 async def upload_employee(
@@ -1039,30 +1206,28 @@ def generate_mjpeg_for_camera(camera_index: int, conf_threshold: float = 0.3):
 
                     if last_face_results:
                         for (_t, _r, _b, _l), name in last_face_results:
-                            # Log both recognized and unknown faces to attendance
+                            # Log both recognized and unknown faces to database
                             emp_id = face_rec.known_face_ids.get(name, name) if name and name != "Unknown" else "Unknown"
-                            _attendance.insert(0, AttendanceRecord(
+                            record = AttendanceRecord(
                                 employee_id=emp_id,
                                 name=name if name else "Unknown",
                                 timestamp=get_bangladesh_timestamp(),
                                 camera_id=camera_id,
                                 entry_type=entry_type
-                            ))
-                            if len(_attendance) > 1000:
-                                del _attendance[1000:]
+                            )
+                            save_attendance_to_db(record)
                     else:
                         # No faces found but bodies detected — log Unknown entries so UI shows activity
                         if last_body_boxes:
                             for _ in last_body_boxes:
-                                _attendance.insert(0, AttendanceRecord(
+                                record = AttendanceRecord(
                                     employee_id="Unknown",
                                     name="Unknown",
                                     timestamp=get_bangladesh_timestamp(),
                                     camera_id=camera_id,
                                     entry_type=entry_type
-                                ))
-                            if len(_attendance) > 1000:
-                                del _attendance[1000:]
+                                )
+                                save_attendance_to_db(record)
                 except Exception:
                     pass
 
@@ -1263,13 +1428,34 @@ async def process_frame(frame: UploadFile = File(...)):
 
 @app.get("/attendance", response_model=List[AttendanceRecord])
 async def list_attendance():
-    return _attendance
+    """Get attendance records from database with current employee names"""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT a.employee_id, e.name, a.timestamp, a.camera_id, a.entry_type
+        FROM attendance a
+        LEFT JOIN employees e ON a.employee_id = e.employee_id
+        ORDER BY a.timestamp DESC
+        LIMIT 1000
+    ''')
+    rows = cursor.fetchall()
+    conn.close()
+
+    return [
+        AttendanceRecord(
+            employee_id=row['employee_id'],
+            name=row['name'] if row['name'] else row['employee_id'],  # Fallback to ID if name not found
+            timestamp=row['timestamp'],
+            camera_id=row['camera_id'],
+            entry_type=row['entry_type']
+        )
+        for row in rows
+    ]
 
 @app.post("/attendance", response_model=AttendanceRecord, status_code=status.HTTP_201_CREATED)
 async def create_attendance(record: AttendanceRecord):
-    _attendance.insert(0, record)
-    if len(_attendance) > 1000:
-        del _attendance[1000:]
+    """Create attendance record in database"""
+    save_attendance_to_db(record)
     return record
 
 # Alert endpoints
@@ -1323,10 +1509,12 @@ def _auto_discover_cameras():
                             role="none",
                             status="online"  # Set as online since we successfully opened it
                         )
+                        save_camera_to_db(_cameras[camera_id])
                         print(f"   ✅ Found Camera {idx} ({camera_id})")
                     else:
                         # Update existing camera to online
                         _cameras[camera_id].status = "online"
+                        save_camera_to_db(_cameras[camera_id])
 
                     available_cameras.append({
                         "index": idx,
@@ -1357,6 +1545,8 @@ async def update_camera(camera_id: str, role: str = None):
     if camera_id in _cameras:
         if role:
             _cameras[camera_id].role = role
+            # Save to database
+            save_camera_to_db(_cameras[camera_id])
         return _cameras[camera_id]
     raise HTTPException(status_code=404, detail="Camera not found")
 
@@ -1410,10 +1600,12 @@ def _update_camera_status(camera_id: str):
             role="none",
             status="online"
         )
+        save_camera_to_db(_cameras[camera_id])
         print(f"📹 Camera registered: {camera_name} ({camera_id})")
     else:
         # Update status to online
         _cameras[camera_id].status = "online"
+        save_camera_to_db(_cameras[camera_id])
 
 def _check_camera_offline():
     """Check if any cameras are offline and create alerts"""
@@ -1430,6 +1622,7 @@ def _check_camera_offline():
                 # Update camera status to offline
                 if camera_id in _cameras:
                     _cameras[camera_id].status = "offline"
+                    save_camera_to_db(_cameras[camera_id])
 
                 # Check if alert already exists for this camera
                 existing_alert = any(
@@ -1596,6 +1789,23 @@ def main():
         print("💻 Running in CPU mode (GPU disabled)")
     else:
         print("✅ GPU optimization is enabled automatically")
+
+    # Initialize database
+    print("\n💾 Initializing database...")
+    init_database()
+
+    # Load cameras from database
+    print("📹 Loading camera configurations from database...")
+    db_cameras = load_cameras_from_db()
+    for cam_id, cam_data in db_cameras.items():
+        _cameras[cam_id] = CameraConfig(
+            id=cam_data['id'],
+            name=cam_data['name'],
+            role=cam_data['role'],
+            status=cam_data['status']
+        )
+    if db_cameras:
+        print(f"✅ Loaded {len(db_cameras)} camera configuration(s) from database")
 
     # Initialize global detectors before any camera streams start
     print("\n🤖 Initializing AI models...")

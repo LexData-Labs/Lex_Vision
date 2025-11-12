@@ -109,6 +109,13 @@ export const api = {
       method: "POST",
       body: JSON.stringify(emp),
     }),
+  updateEmployee: (employeeId: string, name: string) => {
+    const params = new URLSearchParams();
+    params.append("name", name);
+    return request<{ employee_id: string; name: string; message: string }>(`/employees/${employeeId}?${params.toString()}`, {
+      method: "PATCH",
+    });
+  },
   reloadEmployees: () => request<{ status: string; count: number }>("/employees/reload", { method: "POST" }),
   uploadEmployee: async (data: { id: string; name: string; file: File }) => {
     const formData = new FormData();
