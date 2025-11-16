@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { Camera, CameraOff } from "lucide-react";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -12,10 +12,35 @@ export function BackendVideoFeed() {
   // Whether the MJPEG <img> element is currently rendered
   const [isStreaming, setIsStreaming] = useState<boolean>(false);
 
-  // Base URL of the API server. Prefer the Vite env variable so that
-  // production builds can target a different domain.
-  const apiBase = import.meta.env.VITE_API_BASE || "http://localhost:8000";
-  const streamUrl = `${apiBase}/video_feed`;
+  // Base URL for video feed - always use HTTP with port 8000
+  const deriveVideoBase = () => {
+    const envBase = import.meta.env.VITE_API_BASE as string | undefined;
+    if (envBase) {
+      let base = envBase;
+      if (base.endsWith('/api')) base = base.slice(0, -4);
+      else if (base.includes('/api/')) base = base.replace('/api', '');
+      return base;
+    }
+    try {
+      const loc = window?.location as Location | undefined;
+      if (loc?.protocol === 'https:') return loc.origin;
+      const hostname = loc?.hostname;
+      if (hostname && hostname !== "localhost" && hostname !== "127.0.0.1") {
+        return `http://${hostname}:8000`;
+      }
+    } catch {}
+    return "http://localhost:8000";
+  };
+  const videoBase = deriveVideoBase();
+  const [useSnapshot, setUseSnapshot] = useState<boolean>(false);
+  const [tick, setTick] = useState<number>(0);
+  useEffect(() => {
+    if (isStreaming && useSnapshot) {
+      const id = setInterval(() => setTick((t) => t + 1), 800);
+      return () => clearInterval(id);
+    }
+  }, [isStreaming, useSnapshot]);
+  const streamUrl = useSnapshot ? `${videoBase}/snapshot?cb=${tick}` : `${videoBase}/video_feed`;
 
   return (
     <Card className="bg-gradient-card border-0 shadow-elegant">
@@ -27,7 +52,10 @@ export function BackendVideoFeed() {
           </CardTitle>
           <Button
             variant={isStreaming ? "destructive" : "default"}
-            onClick={() => setIsStreaming((prev) => !prev)}
+            onClick={() => {
+              if (isStreaming) setUseSnapshot(false);
+              setIsStreaming((prev) => !prev);
+            }}
             className="gap-2"
           >
             {isStreaming ? (
@@ -49,6 +77,7 @@ export function BackendVideoFeed() {
               src={streamUrl}
               alt="CCTV Stream"
               className="w-full h-full object-cover"
+              onError={() => setUseSnapshot(true)}
             />
           ) : (
             <div className="absolute inset-0 flex items-center justify-center bg-muted">

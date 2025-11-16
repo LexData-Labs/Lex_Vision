@@ -19,6 +19,22 @@ export function ClientCameraStream({ backendUrl }: ClientCameraStreamProps) {
     try {
       setError("");
 
+      // Check if getUserMedia is available
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        setError("Camera API not available. Please use a modern browser (Chrome, Firefox, Edge).");
+        return;
+      }
+
+      // Check if we're on HTTPS or localhost (required for camera access)
+      const isSecure = window.location.protocol === "https:" || 
+                       window.location.hostname === "localhost" || 
+                       window.location.hostname === "127.0.0.1";
+      
+      if (!isSecure) {
+        setError("Camera access requires HTTPS. Please access via https:// or use localhost. For network access, you may need to set up HTTPS or use the server camera mode instead.");
+        return;
+      }
+
       // Request camera access with specific constraints
       const stream = await navigator.mediaDevices.getUserMedia({
         video: {
@@ -37,9 +53,23 @@ export function ClientCameraStream({ backendUrl }: ClientCameraStreamProps) {
         // Start sending frames to backend
         startFrameCapture();
       }
-    } catch (err) {
+    } catch (err: any) {
       console.error("Camera access error:", err);
-      setError("Cannot access camera. Please grant camera permissions.");
+      let errorMessage = "Cannot access camera. ";
+      
+      if (err.name === "NotAllowedError" || err.name === "PermissionDeniedError") {
+        errorMessage += "Please grant camera permissions in your browser settings.";
+      } else if (err.name === "NotFoundError" || err.name === "DevicesNotFoundError") {
+        errorMessage += "No camera found. Please connect a camera.";
+      } else if (err.name === "NotReadableError" || err.name === "TrackStartError") {
+        errorMessage += "Camera is already in use by another application.";
+      } else if (err.name === "OverconstrainedError" || err.name === "ConstraintNotSatisfiedError") {
+        errorMessage += "Camera doesn't support the required settings.";
+      } else {
+        errorMessage += `Error: ${err.message || err.name || "Unknown error"}`;
+      }
+      
+      setError(errorMessage);
     }
   };
 

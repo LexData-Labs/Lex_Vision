@@ -10,6 +10,15 @@ interface MultiCameraViewProps {
 
 export function MultiCameraView({ cameras }: MultiCameraViewProps) {
   const [activeCameras, setActiveCameras] = useState<CameraConfig[]>([]);
+  const [fallback, setFallback] = useState<Record<string, boolean>>({});
+  const [tick, setTick] = useState(0);
+  useEffect(() => {
+    const anyFallback = Object.values(fallback).some(Boolean);
+    if (anyFallback) {
+      const id = setInterval(() => setTick((t) => t + 1), 800);
+      return () => clearInterval(id);
+    }
+  }, [fallback]);
 
   useEffect(() => {
     // Filter only online cameras
@@ -59,6 +68,8 @@ export function MultiCameraView({ cameras }: MultiCameraViewProps) {
         const videoUrl = cameraIndex !== undefined
           ? api.getVideoFeedUrl(cameraIndex)
           : api.getVideoFeedUrl();
+        const snapshotUrl = videoUrl.replace('/video_feed', '/snapshot') + `?cb=${tick}`;
+
 
         return (
           <Card key={camera.id} className="bg-gradient-card border-0 shadow-elegant">
@@ -74,12 +85,14 @@ export function MultiCameraView({ cameras }: MultiCameraViewProps) {
             <CardContent>
               <div className="relative aspect-video bg-black rounded-lg overflow-hidden">
                 <img
-                  src={videoUrl}
+                  src={fallback[camera.id] ? snapshotUrl : videoUrl}
                   alt={camera.name}
                   className="w-full h-full object-contain"
-                  onError={(e) => {
-                    const target = e.target as HTMLImageElement;
-                    target.src = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='200' height='200'%3E%3Crect fill='%23333' width='200' height='200'/%3E%3Ctext fill='%23fff' x='50%25' y='50%25' text-anchor='middle' dominant-baseline='middle'%3ECamera Offline%3C/text%3E%3C/svg%3E";
+                  onLoad={() => {
+                    console.log(`[MultiCameraView] Camera ${camera.id} ${fallback[camera.id] ? 'snapshot' : 'video'} loaded successfully`);
+                  }}
+                  onError={() => {
+                    setFallback((prev) => ({ ...prev, [camera.id]: true }));
                   }}
                 />
                 <div className="absolute bottom-2 left-2 bg-black/70 text-white px-2 py-1 rounded text-xs">

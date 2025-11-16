@@ -1,12 +1,14 @@
 // Derive API base:
 // - Use VITE_API_BASE if provided
-// - Else use current hostname with port 8000 for non-localhost access
+// - For network access, use HTTP with port 8000 (direct backend access)
 // - Fallback to localhost:8000
 const deriveApiBase = () => {
   const envBase = (import.meta as any).env.VITE_API_BASE as string | undefined;
   if (envBase) return envBase;
   try {
     const hostname = (window as any)?.location?.hostname;
+    
+    // For network access, use HTTP with port 8000 (direct backend access)
     if (hostname && hostname !== "localhost" && hostname !== "127.0.0.1") {
       return `http://${hostname}:8000`;
     }
@@ -161,10 +163,32 @@ export const api = {
     });
   },
   getVideoFeedUrl: (cameraIndex?: number) => {
-    if (cameraIndex !== undefined) {
-      return `${API_BASE}/video_feed/${cameraIndex}`;
+    // Video feeds use direct backend endpoint (HTTP, port 8000)
+    // Always use the same base as API_BASE (which is already http://hostname:8000)
+    let videoBase = API_BASE;
+    
+    // Remove /api prefix if present (shouldn't be, but just in case)
+    if (videoBase.endsWith('/api')) {
+      videoBase = videoBase.slice(0, -4);
+    } else if (videoBase.includes('/api/')) {
+      videoBase = videoBase.replace('/api', '');
     }
-    return `${API_BASE}/video_feed`;
+    
+    // Ensure we're using HTTP for video feeds (direct backend access)
+    try {
+      const hostname = (window as any)?.location?.hostname;
+      if (hostname && hostname !== "localhost" && hostname !== "127.0.0.1") {
+        // Always use HTTP with port 8000 for network access
+        videoBase = `http://${hostname}:8000`;
+      }
+    } catch {
+      // Keep existing videoBase if window is not available
+    }
+    
+    if (cameraIndex !== undefined) {
+      return `${videoBase}/video_feed/${cameraIndex}`;
+    }
+    return `${videoBase}/video_feed`;
   },
 };
 

@@ -178,7 +178,19 @@ Lex_Vision/
 - **Frame Processing**: Real-time detection overlays (boxes, labels, confidence)
 
 ### 4. Attendance Tracking
-- **Storage**: In-memory list (max 1000 records)
+- **Storage**: SQLite database (`data/lex_vision.db`) with in-memory cache
+- **Database Schema**:
+  ```sql
+  CREATE TABLE attendance (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      employee_id TEXT NOT NULL,
+      name TEXT NOT NULL,
+      timestamp TEXT NOT NULL,
+      camera_id TEXT,
+      entry_type TEXT,
+      FOREIGN KEY (employee_id) REFERENCES employees(employee_id)
+  )
+  ```
 - **Data Model**:
   ```python
   AttendanceRecord(
@@ -189,8 +201,11 @@ Lex_Vision/
       entry_type?: "entry" | "exit" | null
   )
   ```
+- **Persistence**: All records saved to database via `save_attendance_to_db()`
+- **Retrieval**: API endpoint reads from database (JOIN with employees table)
 - **Logging**: Both recognized and unknown faces are logged
 - **Timezone**: All timestamps in Bangladesh Standard Time (UTC+6)
+- **Limit**: API returns max 1000 most recent records
 
 ### 5. User Management
 - **Employee CRUD**:
@@ -352,11 +367,22 @@ App
 - **Storage**: In-memory arrays (`known_face_encodings`, `known_face_names`)
 
 ### Data Storage
-- **In-Memory Only** (no database):
-  - `_employees: Dict[str, Employee]` - Employee registry
-  - `_attendance: List[AttendanceRecord]` - Attendance logs (max 1000)
-  - `_alerts: List[Alert]` - System alerts
-  - `_cameras: Dict[str, CameraConfig]` - Camera configurations
+- **SQLite Database** (`data/lex_vision.db`):
+  - **employees** table - Employee registry (employee_id, name)
+  - **attendance** table - Attendance logs with foreign key to employees
+  - **cameras** table - Camera configurations
+  - **alerts** table - System alerts
+  - Uses WAL mode for better concurrency
+  - Database initialized at startup via `init_database()`
+  
+- **In-Memory Cache** (for performance):
+  - `_employees: Dict[str, Employee]` - Employee cache (synced with DB)
+  - `_attendance: List[AttendanceRecord]` - Temporary cache during processing
+  - `_alerts: List[Alert]` - Alert cache
+  - `_cameras: Dict[str, CameraConfig]` - Camera cache (synced with DB)
+  
+- **Persistence**: All attendance records are saved to database via `save_attendance_to_db()`
+- **API Endpoints**: Attendance endpoint (`GET /attendance`) reads from database, not memory
 
 ### Video Processing Pipeline
 ```
@@ -431,30 +457,30 @@ Log to Attendance
 7. **Modern UI**: shadcn/ui components, responsive design
 
 ### Areas for Improvement
-1. **Data Persistence**: Currently in-memory only (no database)
-2. **Authentication**: Mock auth (no real JWT/tokens)
-3. **Error Logging**: No centralized logging system
-4. **Testing**: No unit/integration tests visible
-5. **Documentation**: API docs via FastAPI, but no inline code docs
-6. **Performance**: Frame skipping helps, but could optimize further
-7. **Security**: CORS allows `*`, no rate limiting, no input validation on some endpoints
+1. **Authentication**: Mock auth (no real JWT/tokens) - **CRITICAL**
+2. **Error Logging**: No centralized logging system (only print statements)
+3. **Testing**: No unit/integration tests visible
+4. **Documentation**: API docs via FastAPI, but limited inline code docs
+5. **Performance**: Frame skipping helps, but could optimize further
+6. **Security**: CORS allows `*`, no rate limiting, limited input validation
+7. **Data Sync**: In-memory caches may get out of sync with database
 
 ---
 
 ## 🐛 Known Issues & Limitations
 
 ### Current Issues
-1. **Camera Stream Errors**: MSMF backend on Windows can cause `cv2.error` (partially mitigated)
-2. **Memory Growth**: In-memory stores can grow (attendance capped at 1000)
-3. **No Persistence**: Data lost on restart
-4. **Mock Auth**: No real security
+1. **Camera Stream Errors**: MSMF backend on Windows can cause `cv2.error` (partially mitigated with DirectShow priority)
+2. **Cache Sync**: In-memory caches (`_employees`, `_cameras`) may not always reflect database state
+3. **Mock Auth**: No real security - **CRITICAL for production**
+4. **Database Location**: SQLite file in `data/` directory (should be configurable)
 
 ### Limitations
-1. **Single Backend Instance**: No horizontal scaling
-2. **No Database**: Can't query historical data efficiently
+1. **Single Backend Instance**: No horizontal scaling (SQLite doesn't support multi-writer well)
+2. **SQLite Scale**: Works well for small-medium deployments; may need PostgreSQL for large scale
 3. **Face Recognition Accuracy**: Depends on image quality and lighting
-4. **CPU Performance**: Limited to 5-15 FPS on CPU
-5. **No Multi-User**: Single admin session (no concurrent users tested)
+4. **CPU Performance**: Limited to 5-15 FPS on CPU (GPU mode available)
+5. **Cache Consistency**: In-memory caches may need manual refresh to sync with database
 
 ---
 
@@ -466,12 +492,12 @@ Log to Attendance
 - ✅ Local camera access
 
 ### Production Readiness
-- ⚠️ **Database Required**: Need PostgreSQL/MySQL for persistence
-- ⚠️ **Authentication**: Implement real JWT/OAuth
+- ✅ **Database**: SQLite already implemented (can upgrade to PostgreSQL for scale)
+- ⚠️ **Authentication**: **CRITICAL** - Implement real JWT/OAuth (currently mock)
 - ⚠️ **Security**: Add rate limiting, input validation, HTTPS
-- ⚠️ **Monitoring**: Add logging (e.g., Loguru, Sentry)
-- ⚠️ **Scaling**: Consider Redis for caching, load balancing
-- ⚠️ **Backup**: Implement data backup strategy
+- ⚠️ **Monitoring**: Add structured logging (e.g., Loguru, Sentry) - currently only print()
+- ⚠️ **Scaling**: SQLite works for small scale; consider PostgreSQL + Redis for larger deployments
+- ⚠️ **Backup**: Implement automated database backup strategy
 
 ### Recommended Production Stack
 ```
@@ -550,10 +576,11 @@ Monitoring: Prometheus + Grafana
 
 ### Short-Term (Immediate)
 1. ✅ **Fix Camera Issues**: Already partially addressed (DirectShow priority)
-2. ✅ **Add Database**: Implement SQLite/PostgreSQL for persistence
-3. ✅ **Real Authentication**: Replace mock auth with JWT
-4. ✅ **Error Logging**: Add structured logging (Loguru)
-5. ✅ **Input Validation**: Validate all API inputs
+2. ✅ **Database**: SQLite already implemented - consider migration path to PostgreSQL
+3. 🔴 **Real Authentication**: **URGENT** - Replace mock auth with JWT/OAuth
+4. 🔴 **Error Logging**: Add structured logging (Loguru) - currently only print()
+5. ⚠️ **Input Validation**: Enhance validation on all API endpoints
+6. ⚠️ **Cache Sync**: Ensure in-memory caches stay in sync with database
 
 ### Medium-Term (Next Sprint)
 1. **Testing**: Add unit tests (pytest) and E2E tests (Playwright)
@@ -606,9 +633,20 @@ Monitoring: Prometheus + Grafana
 - Performance limitations in CPU mode
 
 ### Overall Assessment
-**Grade: B+** (Good, production-ready with improvements)
+**Grade: A-** (Very Good, near production-ready)
 
-The project is **functional and deployable** for small-scale use cases, but requires **database integration, real authentication, and security hardening** for production deployment. The codebase is **well-organized and maintainable**, making it a solid foundation for future enhancements.
+The project is **functional and deployable** for small to medium-scale use cases. It has **database persistence already implemented** (SQLite), which is a significant strength. However, it **urgently requires real authentication and security hardening** for production deployment. The codebase is **well-organized and maintainable**, with a solid foundation for future enhancements.
+
+**Key Strengths:**
+- ✅ Database persistence (SQLite with proper schema)
+- ✅ Modern tech stack
+- ✅ Real-time processing
+- ✅ Clean architecture
+
+**Critical Gaps:**
+- 🔴 Mock authentication (security risk)
+- 🔴 Limited logging/monitoring
+- ⚠️ Cache synchronization concerns
 
 ---
 

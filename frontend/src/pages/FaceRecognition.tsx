@@ -26,11 +26,13 @@ export default function FaceRecognition() {
   const [cameraMode, setCameraMode] = useState<"server" | "client" | "multi">("multi");
   const videoRef = useRef<HTMLObjectElement>(null);
 
-  // Get backend URL based on current location
+  // Get backend URL - always use HTTP with port 8000
   const getBackendUrl = () => {
-    // If accessing from network, use the same host
-    if (window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1') {
-      return `http://${window.location.hostname}:8000`;
+    const hostname = window.location.hostname;
+    
+    // For network access, always use HTTP with port 8000
+    if (hostname !== 'localhost' && hostname !== '127.0.0.1') {
+      return `http://${hostname}:8000`;
     }
     return 'http://localhost:8000';
   };
