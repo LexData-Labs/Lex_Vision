@@ -27,6 +27,7 @@ env/
 ENV/
 .venv
 *.whl
+nul
 
 # PyTorch / ML Models
 *.pt

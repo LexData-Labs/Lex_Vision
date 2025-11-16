@@ -28,6 +28,15 @@ export interface LoginResponse {
   access_token: string;
   token_type: string;
   role: "administrator" | "employee" | string;
+  employee_id: string;
+  name: string;
+  password_reset_required: boolean;
+}
+
+export interface PasswordGenerateResponse {
+  employee_id: string;
+  password: string;
+  message: string;
 }
 
 export interface AttendanceRecord {
@@ -105,7 +114,7 @@ export const api = {
       method: "POST",
       body: JSON.stringify(rec),
     }),
-  employees: () => request<{ id: string; name: string }[]>("/employees"),
+  employees: () => request<{ id: string; name: string; has_password: boolean; password_reset_required: boolean; last_login: string | null }[]>("/employees"),
   createEmployee: (emp: { id: string; name: string }) =>
     request<{ id: string; name: string }>("/employees", {
       method: "POST",
@@ -162,6 +171,20 @@ export const api = {
       method: "PATCH",
     });
   },
+
+  // Password Management API
+  generatePassword: (employeeId: string) =>
+    request<PasswordGenerateResponse>(`/employees/${employeeId}/generate-password`, {
+      method: "POST",
+    }),
+  resetPassword: (employeeId: string, newPassword: string) => {
+    const params = new URLSearchParams();
+    params.append("new_password", newPassword);
+    return request<{ message: string }>(`/employees/${employeeId}/reset-password?${params.toString()}`, {
+      method: "POST",
+    });
+  },
+
   getVideoFeedUrl: (cameraIndex?: number) => {
     // Video feeds use direct backend endpoint (HTTP, port 8000)
     // Always use the same base as API_BASE (which is already http://hostname:8000)

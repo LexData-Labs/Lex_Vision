@@ -6,7 +6,7 @@ import { Badge } from "@/components/ui/badge";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { Label } from "@/components/ui/label";
-import { Users as UsersIcon, UserPlus, Search, Filter, Edit, Trash2, Shield, User, Camera, Settings } from "lucide-react";
+import { Users as UsersIcon, UserPlus, Search, Filter, Edit, Trash2, Shield, User, Camera, Settings, Key, Copy, CheckCircle } from "lucide-react";
 import { api } from "@/services/api";
 
 interface User {
@@ -20,6 +20,8 @@ interface User {
   permissions: string[];
   department?: string;
   faceRegistered: boolean;
+  has_password: boolean;
+  password_reset_required: boolean;
 }
 
 export default function Users() {
@@ -31,6 +33,9 @@ export default function Users() {
   const [isAddUserOpen, setIsAddUserOpen] = useState(false);
   const [isEditUserOpen, setIsEditUserOpen] = useState(false);
   const [editingUser, setEditingUser] = useState<User | null>(null);
+  const [isPasswordDialogOpen, setIsPasswordDialogOpen] = useState(false);
+  const [generatedPassword, setGeneratedPassword] = useState<{ employeeId: string; password: string; name: string } | null>(null);
+  const [passwordCopied, setPasswordCopied] = useState(false);
   
   // Form state for Add/Edit User
   const [formData, setFormData] = useState({
@@ -59,6 +64,9 @@ export default function Users() {
           permissions: [],
           department: undefined,
           faceRegistered: false,
+          has_password: e.has_password,
+          password_reset_required: e.password_reset_required,
+          lastLogin: e.last_login || undefined,
         }));
         setUsers(mapped);
         setFilteredUsers(mapped);
@@ -85,6 +93,9 @@ export default function Users() {
         permissions: [],
         department: undefined,
         faceRegistered: false,
+        has_password: e.has_password,
+        password_reset_required: e.password_reset_required,
+        lastLogin: e.last_login || undefined,
       }));
       setUsers(mapped);
       setFilteredUsers(mapped);
@@ -193,6 +204,9 @@ export default function Users() {
         permissions: [],
         department: undefined,
         faceRegistered: false,
+        has_password: e.has_password,
+        password_reset_required: e.password_reset_required,
+        lastLogin: e.last_login || undefined,
       }));
       setUsers(mapped);
       setFilteredUsers(mapped);
@@ -249,6 +263,39 @@ export default function Users() {
       department: user.department || "",
     });
     setIsEditUserOpen(true);
+  };
+
+  const handleGeneratePassword = async (employeeId: string, employeeName: string) => {
+    try {
+      const result = await api.generatePassword(employeeId);
+      setGeneratedPassword({
+        employeeId: result.employee_id,
+        password: result.password,
+        name: employeeName,
+      });
+      setPasswordCopied(false);
+      setIsPasswordDialogOpen(true);
+
+      // Update user in list to reflect has_password
+      setUsers(prev =>
+        prev.map(user =>
+          user.id === employeeId
+            ? { ...user, has_password: true, password_reset_required: true }
+            : user
+        )
+      );
+    } catch (error) {
+      console.error("Failed to generate password:", error);
+      alert("Failed to generate password. Please try again.");
+    }
+  };
+
+  const handleCopyPassword = () => {
+    if (generatedPassword) {
+      navigator.clipboard.writeText(generatedPassword.password);
+      setPasswordCopied(true);
+      setTimeout(() => setPasswordCopied(false), 2000);
+    }
   };
 
   const getActiveUsersCount = () => users.filter(user => user.status === "active").length;
@@ -464,6 +511,17 @@ export default function Users() {
                            Face Registered
                          </Badge>
                        )}
+                       {user.has_password ? (
+                         <Badge className="bg-green-100 text-green-800 flex items-center gap-1">
+                           <Key className="h-3 w-3" />
+                           Password Set
+                         </Badge>
+                       ) : (
+                         <Badge variant="outline" className="border-orange-300 text-orange-700 flex items-center gap-1">
+                           <Key className="h-3 w-3" />
+                           No Password
+                         </Badge>
+                       )}
                      </div>
                     
                     <p className="text-muted-foreground mb-1">{user.email}</p>
@@ -484,6 +542,16 @@ export default function Users() {
                 </div>
 
                 <div className="flex items-center gap-2">
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => handleGeneratePassword(user.id, user.username)}
+                    className="flex items-center gap-1"
+                  >
+                    <Key className="h-4 w-4" />
+                    {user.has_password ? "Reset Password" : "Generate Password"}
+                  </Button>
+
                   <Button
                     size="sm"
                     variant="outline"
@@ -603,6 +671,68 @@ export default function Users() {
             </Button>
             <Button onClick={handleEditUser}>
               Save Changes
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Password Generation Dialog */}
+      <Dialog open={isPasswordDialogOpen} onOpenChange={setIsPasswordDialogOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Password Generated Successfully</DialogTitle>
+            <DialogDescription>
+              A new password has been generated for {generatedPassword?.name}.
+              Please copy and share this password securely with the employee.
+              This password will only be shown once.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 py-4">
+            <div className="bg-muted p-4 rounded-lg">
+              <div className="flex items-center justify-between">
+                <div>
+                  <p className="text-sm text-muted-foreground mb-1">Employee ID</p>
+                  <p className="font-mono font-semibold">{generatedPassword?.employeeId}</p>
+                </div>
+              </div>
+            </div>
+
+            <div className="bg-muted p-4 rounded-lg">
+              <p className="text-sm text-muted-foreground mb-2">Generated Password</p>
+              <div className="flex items-center gap-2">
+                <code className="flex-1 bg-background p-3 rounded border font-mono text-lg font-bold">
+                  {generatedPassword?.password}
+                </code>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={handleCopyPassword}
+                  className="flex items-center gap-2"
+                >
+                  {passwordCopied ? (
+                    <>
+                      <CheckCircle className="h-4 w-4 text-green-600" />
+                      Copied!
+                    </>
+                  ) : (
+                    <>
+                      <Copy className="h-4 w-4" />
+                      Copy
+                    </>
+                  )}
+                </Button>
+              </div>
+            </div>
+
+            <div className="bg-orange-50 border border-orange-200 p-3 rounded-lg">
+              <p className="text-sm text-orange-800">
+                <strong>Important:</strong> The employee will be required to change this password on first login.
+              </p>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button onClick={() => setIsPasswordDialogOpen(false)}>
+              Close
             </Button>
           </DialogFooter>
         </DialogContent>

@@ -16,7 +16,7 @@ const Index = () => {
               </div>
               <div>
                 <h1 className="text-2xl font-bold bg-gradient-primary bg-clip-text text-transparent">
-                  Lex Vision
+                  LexVision
                 </h1>
                 <p className="text-sm text-muted-foreground">Face Recognition Dashboard</p>
               </div>

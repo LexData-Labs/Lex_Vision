@@ -1,5 +1,5 @@
 """
-Lex Vision Backend Package
+LexVision Backend Package
 CCTV Body and Face Detection System
 """
 

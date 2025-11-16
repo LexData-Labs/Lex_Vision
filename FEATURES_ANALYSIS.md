@@ -1,7 +1,7 @@
-# 🎯 Lex Vision - Feature Analysis
+# 🎯 LexVision - Feature Analysis
 
 ## Project Overview
-**Lex Vision** is a real-time CCTV monitoring system with automatic body detection and face recognition for employee attendance tracking. It combines computer vision, web technologies, and modern UI/UX to provide a comprehensive attendance management solution.
+**LexVision** is a real-time CCTV monitoring system with automatic body detection and face recognition for employee attendance tracking. It combines computer vision, web technologies, and modern UI/UX to provide a comprehensive attendance management solution.
 
 ---
 
@@ -351,7 +351,7 @@
 
 ## 🎉 Summary
 
-**Lex Vision** is a comprehensive CCTV-based attendance system with:
+**LexVision** is a comprehensive CCTV-based attendance system with:
 - ✅ Real-time body and face detection
 - ✅ Modern web interface
 - ✅ Role-based access control

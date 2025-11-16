@@ -1,4 +1,4 @@
-# 🌐 Network Access Guide for Lex Vision
+# 🌐 Network Access Guide for LexVision
 
 ## Problem
 When accessing the application from another PC on the network (e.g., `http://192.168.140.36:8080/`), the following issues may occur:
@@ -79,13 +79,13 @@ Make sure Windows Firewall allows connections:
 1. **Backend (Port 8000):**
    ```powershell
    # Allow inbound on port 8000
-   New-NetFirewallRule -DisplayName "Lex Vision Backend" -Direction Inbound -LocalPort 8000 -Protocol TCP -Action Allow
+   New-NetFirewallRule -DisplayName "LexVision Backend" -Direction Inbound -LocalPort 8000 -Protocol TCP -Action Allow
    ```
 
 2. **Frontend (Port 8080):**
    ```powershell
    # Allow inbound on port 8080
-   New-NetFirewallRule -DisplayName "Lex Vision Frontend" -Direction Inbound -LocalPort 8080 -Protocol TCP -Action Allow
+   New-NetFirewallRule -DisplayName "LexVision Frontend" -Direction Inbound -LocalPort 8080 -Protocol TCP -Action Allow
    ```
 
 ### 5. Testing Network Access

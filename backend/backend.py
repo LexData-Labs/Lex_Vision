@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Lex Vision - CCTV Body and Face Detection System
+LexVision - CCTV Body and Face Detection System
 Merged Backend - All functionality in one file for easy deployment
 """
 
@@ -53,6 +53,10 @@ from queue import Queue
 # Database
 import sqlite3
 import json
+import secrets
+import string
+import hashlib
+from datetime import timedelta
 
 # GPU monitoring (optional)
 try:
@@ -89,9 +93,35 @@ def init_database():
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS employees (
             employee_id TEXT PRIMARY KEY,
-            name TEXT NOT NULL
+            name TEXT NOT NULL,
+            password TEXT,
+            password_reset_required INTEGER DEFAULT 1,
+            last_login TEXT
         )
     ''')
+
+    # Migrate existing employees table to add new columns if they don't exist
+    try:
+        cursor.execute("PRAGMA table_info(employees)")
+        columns = [col[1] for col in cursor.fetchall()]
+
+        if 'password' not in columns:
+            print("🔄 Migrating database: Adding password column...")
+            cursor.execute("ALTER TABLE employees ADD COLUMN password TEXT")
+
+        if 'password_reset_required' not in columns:
+            print("🔄 Migrating database: Adding password_reset_required column...")
+            cursor.execute("ALTER TABLE employees ADD COLUMN password_reset_required INTEGER DEFAULT 1")
+
+        if 'last_login' not in columns:
+            print("🔄 Migrating database: Adding last_login column...")
+            cursor.execute("ALTER TABLE employees ADD COLUMN last_login TEXT")
+
+        conn.commit()
+        print("✅ Database migration completed")
+    except Exception as e:
+        print(f"⚠️  Database migration error: {e}")
+        conn.rollback()
 
     # Attendance table - stores employee_id reference and name (denormalized for display)
     cursor.execute('''
@@ -745,10 +775,24 @@ class LoginResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
     role: str
+    employee_id: str
+    name: str
+    password_reset_required: bool = False
 
 class Employee(BaseModel):
     id: str
     name: str
+    has_password: bool = False
+    password_reset_required: bool = False
+    last_login: str | None = None
+
+class PasswordGenerateRequest(BaseModel):
+    employee_id: str
+
+class PasswordGenerateResponse(BaseModel):
+    employee_id: str
+    password: str
+    message: str
 
 class AttendanceRecord(BaseModel):
     employee_id: str
@@ -783,6 +827,7 @@ _alerts: List[Alert] = []
 _camera_last_seen: Dict[str, str] = {}  # Track camera last activity
 _unknown_face_count: Dict[str, int] = {}  # Track unknown faces by time window
 _cameras: Dict[str, CameraConfig] = {}  # Camera configurations
+_discovered_cameras: set = set()  # Track which cameras were actually discovered
 
 # Multi-camera support
 _active_camera_streams: Dict[int, int] = {}  # Track viewer count per camera
@@ -790,9 +835,63 @@ _camera_locks: Dict[int, threading.Lock] = defaultdict(threading.Lock)  # Thread
 
 # Shared camera capture system (ONE capture per camera, multiple viewers)
 _shared_captures: Dict[int, any] = {}  # Shared VideoCapture instances
-_latest_frames: Dict[int, bytes] = {}  # Latest JPEG frame for each camera
+_latest_frames: Dict[int, bytes] = {}  # Latest JPEG frame for each camera (ready to stream)
 _capture_threads: Dict[int, threading.Thread] = {}  # Background capture threads
 _thread_stop_events: Dict[int, threading.Event] = {}  # Stop signals
+_frame_ready_events: Dict[int, threading.Event] = {}  # Signal when new frame is available
+_last_attendance_log: Dict[str, Dict[str, float]] = defaultdict(dict)  # Track last log time per person per camera
+
+# Authentication
+_active_sessions: Dict[str, Dict[str, Any]] = {}  # session_token -> {employee_id, role, expires_at}
+
+# ============================================================================
+# Password & Authentication Utilities
+# ============================================================================
+
+def hash_password(password: str) -> str:
+    """Hash password using SHA-256"""
+    return hashlib.sha256(password.encode()).hexdigest()
+
+def verify_password(plain_password: str, hashed_password: str) -> bool:
+    """Verify password against hash"""
+    return hash_password(plain_password) == hashed_password
+
+def generate_random_password(length: int = 8) -> str:
+    """Generate random password"""
+    characters = string.ascii_letters + string.digits
+    return ''.join(secrets.choice(characters) for _ in range(length))
+
+def generate_session_token() -> str:
+    """Generate secure session token"""
+    return secrets.token_urlsafe(32)
+
+def create_session(employee_id: str, role: str = "employee") -> str:
+    """Create new session and return token"""
+    token = generate_session_token()
+    expires_at = datetime.now() + timedelta(hours=24)
+    _active_sessions[token] = {
+        "employee_id": employee_id,
+        "role": role,
+        "expires_at": expires_at
+    }
+    return token
+
+def verify_session(token: str) -> Dict[str, Any]:
+    """Verify session token and return session data"""
+    if token not in _active_sessions:
+        return None
+
+    session = _active_sessions[token]
+    if datetime.now() > session["expires_at"]:
+        del _active_sessions[token]
+        return None
+
+    return session
+
+def invalidate_session(token: str):
+    """Invalidate a session token"""
+    if token in _active_sessions:
+        del _active_sessions[token]
 
 def _load_employees_from_data():
     """
@@ -853,10 +952,107 @@ _load_employees_from_data()
 # Auth endpoints
 @app.post("/login", response_model=LoginResponse)
 async def login(credentials: LoginRequest):
+    """Authenticate user and create session"""
     if not credentials.username or not credentials.password:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Username and password required")
-    role = "administrator" if credentials.username.lower() == "admin" else "employee"
-    return LoginResponse(access_token="dummy", role=role)
+
+    # Check for admin login (hardcoded)
+    if credentials.username.lower() == "admin":
+        if credentials.password == "admin":  # Default admin password
+            token = create_session("admin", "administrator")
+            return LoginResponse(
+                access_token=token,
+                role="administrator",
+                employee_id="admin",
+                name="Administrator",
+                password_reset_required=False
+            )
+        else:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
+
+    # Check employee login
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        'SELECT employee_id, name, password, password_reset_required FROM employees WHERE employee_id = ?',
+        (credentials.username,)
+    )
+    row = cursor.fetchone()
+    conn.close()
+
+    if not row:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
+
+    employee_id, name, hashed_password, password_reset_required = row['employee_id'], row['name'], row['password'], row['password_reset_required']
+
+    # Check if password is set
+    if not hashed_password:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Password not set. Contact administrator.")
+
+    # Verify password
+    if not verify_password(credentials.password, hashed_password):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
+
+    # Update last login
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        'UPDATE employees SET last_login = ? WHERE employee_id = ?',
+        (get_bangladesh_timestamp(), employee_id)
+    )
+    conn.commit()
+    conn.close()
+
+    # Create session
+    token = create_session(employee_id, "employee")
+
+    return LoginResponse(
+        access_token=token,
+        role="employee",
+        employee_id=employee_id,
+        name=name,
+        password_reset_required=bool(password_reset_required)
+    )
+
+@app.post("/logout")
+async def logout(token: str = None):
+    """Logout user and invalidate session"""
+    if token:
+        invalidate_session(token)
+    return {"message": "Logged out successfully"}
+
+@app.get("/me")
+async def get_current_user(token: str):
+    """Get current user info from session token"""
+    session = verify_session(token)
+    if not session:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired session")
+
+    employee_id = session["employee_id"]
+    role = session["role"]
+
+    if role == "administrator":
+        return {
+            "employee_id": "admin",
+            "name": "Administrator",
+            "role": "administrator"
+        }
+
+    # Get employee details
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('SELECT employee_id, name FROM employees WHERE employee_id = ?', (employee_id,))
+    row = cursor.fetchone()
+    conn.close()
+
+    if not row:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Employee not found")
+
+    return {
+        "employee_id": row['employee_id'],
+        "name": row['name'],
+        "role": "employee"
+    }
 
 # Employee CRUD
 @app.get("/employees", response_model=List[Employee])
@@ -864,10 +1060,18 @@ async def list_employees():
     """Get all employees from database"""
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute('SELECT employee_id, name FROM employees ORDER BY name')
+    cursor.execute('SELECT employee_id, name, password, password_reset_required, last_login FROM employees ORDER BY name')
     rows = cursor.fetchall()
     conn.close()
-    return [Employee(id=row['employee_id'], name=row['name']) for row in rows]
+    return [
+        Employee(
+            id=row['employee_id'],
+            name=row['name'],
+            has_password=bool(row['password']),
+            password_reset_required=bool(row['password_reset_required']) if row['password_reset_required'] is not None else False,
+            last_login=row['last_login']
+        ) for row in rows
+    ]
 
 @app.post("/employees", response_model=Employee, status_code=status.HTTP_201_CREATED)
 async def create_employee(emp: Employee):
@@ -949,6 +1153,68 @@ async def upload_employee(
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/employees/{employee_id}/generate-password", response_model=PasswordGenerateResponse)
+async def generate_employee_password(employee_id: str):
+    """Generate and set a new password for employee (admin only)"""
+    # Check if employee exists
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('SELECT employee_id, name FROM employees WHERE employee_id = ?', (employee_id,))
+    row = cursor.fetchone()
+
+    if not row:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Employee not found")
+
+    # Generate random password
+    new_password = generate_random_password(8)
+    hashed_password = hash_password(new_password)
+
+    # Update employee password
+    cursor.execute(
+        'UPDATE employees SET password = ?, password_reset_required = 1 WHERE employee_id = ?',
+        (hashed_password, employee_id)
+    )
+    conn.commit()
+    conn.close()
+
+    print(f"✅ Generated password for employee {employee_id}: {new_password}")
+
+    return PasswordGenerateResponse(
+        employee_id=employee_id,
+        password=new_password,
+        message=f"Password generated successfully for {row['name']}"
+    )
+
+@app.post("/employees/{employee_id}/reset-password")
+async def reset_employee_password(employee_id: str, new_password: str):
+    """Reset employee password (admin or self)"""
+    if not new_password or len(new_password) < 6:
+        raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
+
+    # Check if employee exists
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('SELECT employee_id FROM employees WHERE employee_id = ?', (employee_id,))
+    row = cursor.fetchone()
+
+    if not row:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Employee not found")
+
+    # Hash and update password
+    hashed_password = hash_password(new_password)
+    cursor.execute(
+        'UPDATE employees SET password = ?, password_reset_required = 0 WHERE employee_id = ?',
+        (hashed_password, employee_id)
+    )
+    conn.commit()
+    conn.close()
+
+    print(f"✅ Password reset for employee {employee_id}")
+
+    return {"message": "Password reset successfully"}
 
 @app.api_route("/employees/reload", methods=["POST", "GET"])
 async def reload_employees():
@@ -1129,304 +1395,55 @@ def _open_video_capture_by_index(camera_index: int):
 
     raise RuntimeError(f"❌ Could not open camera {camera_index} - all backends failed")
 
-def generate_mjpeg_for_camera(camera_index: int, conf_threshold: float = 0.3):
-    """Generate MJPEG video stream for specific camera with detection overlays"""
+def _camera_capture_thread(camera_index: int):
+    """
+    Background thread that captures frames from ONE camera and serves ALL viewers.
+    This prevents Windows DirectShow conflicts from multiple VideoCapture instances.
+    """
     camera_id = f"CAM-{camera_index}"
+    print(f"🎬 Starting shared capture thread for {camera_id}")
 
-    # MULTI-VIEWER MODE: Allow multiple devices/tabs to view the same camera
-    # Mark camera as active (used for status tracking only, not blocking)
-    import numpy as np
-    camera_lock = _camera_locks[camera_index]
-
-    with camera_lock:
-        # Track that this camera has at least one viewer
-        viewer_count = _active_camera_streams.get(camera_index, 0)
-        if isinstance(viewer_count, bool):
-            viewer_count = 1 if viewer_count else 0
-        _active_camera_streams[camera_index] = viewer_count + 1
-        print(f"✅ Camera {camera_index} viewer connected (total viewers: {viewer_count + 1})")
+    stop_event = _thread_stop_events[camera_index]
+    frame_ready = _frame_ready_events[camera_index]
 
     try:
-        # Use shared global detectors instead of creating new ones
+        # Open camera ONCE for this thread
         body_det, face_rec = _get_global_detectors()
-
-        # Open camera (lock already released, but camera is marked as active)
         cap, _ = _open_video_capture_by_index(camera_index)
-        _update_camera_status(camera_id)
-    except Exception as e:
-        print(f"❌ Error initializing video stream for {camera_id}: {e}")
-        # Decrement viewer count since opening failed
-        with camera_lock:
-            viewer_count = _active_camera_streams.get(camera_index, 1)
-            if isinstance(viewer_count, bool):
-                viewer_count = 1 if viewer_count else 0
-            _active_camera_streams[camera_index] = max(0, viewer_count - 1)
-        # Return error image as MJPEG
-        import numpy as np
-        error_frame = np.zeros((480, 640, 3), dtype=np.uint8)
-        cv2.putText(error_frame, "Camera Error", (150, 200),
-                   cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 0, 255), 3)
-        cv2.putText(error_frame, str(e), (50, 250),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
-        cv2.putText(error_frame, "Check camera permissions", (100, 300),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
 
-        while True:
-            ret, jpeg = cv2.imencode('.jpg', error_frame)
-            if ret:
-                yield (b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + jpeg.tobytes() + b'\r\n')
-            time.sleep(0.1)
-
-    # Count active cameras for performance optimization
-    # Count how many cameras are currently streaming (including this one)
-    active_camera_count = sum(1 for active in _active_camera_streams.values() if active)
-    
-    # Optimize settings based on number of active cameras
-    # Use minimal optimizations to maintain quality and detection accuracy
-    if active_camera_count > 2:
-        # Multi-camera mode: keep high resolution for accuracy, only slightly adjust detection
-        # Maintain 1280x720 for best face recognition accuracy
-        target_width = 1280
-        target_height = 720
-        # Stagger detection intervals slightly: camera 0=4, camera 1=5, camera 2=6, camera 3=7
-        # This prevents all cameras from detecting at the same time while maintaining good accuracy
-        base_interval = 4
-        detection_interval = base_interval + (camera_index % 4)
-        jpeg_quality = 75  # Keep high quality for accuracy
-        # Minimal initial delay to stagger camera processing (helps with lock contention)
-        initial_delay = camera_index * 0.02  # 0.02s delay per camera index (minimal)
-        print(f"⚡ Multi-camera mode: {active_camera_count} cameras active, using quality-preserving settings for {camera_id} (interval: {detection_interval} frames)")
-        time.sleep(initial_delay)  # Stagger camera initialization
-    else:
-        # Single/dual camera mode: higher resolution, faster detection
-        target_width = 1280
-        target_height = 720
-        detection_interval = 3
-        jpeg_quality = 75
-        initial_delay = 0
-
-    try:
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, target_width)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, target_height)
+        # Optimal settings
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
         cap.set(cv2.CAP_PROP_FPS, 30)
         cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-    except Exception:
-        pass
-    
-    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
-    # Warm up camera by reading a few frames to flush buffer
-    print(f"🔥 Warming up camera {camera_index}...")
-    warmup_frames = 5
-    first_valid_frame = None
-    for i in range(warmup_frames):
-        ret, test_frame = cap.read()
-        if ret and test_frame is not None and hasattr(test_frame, 'size') and test_frame.size > 0:
-            print(f"   Warmup frame {i+1}/{warmup_frames} OK")
-            if first_valid_frame is None:
-                first_valid_frame = test_frame.copy()
-        else:
-            print(f"   Warmup frame {i+1}/{warmup_frames} failed")
-        time.sleep(0.05)
+        frame_count = 0
+        detection_interval = 4
+        last_body_boxes = []
+        last_face_results = []
 
-    frame_skip = 0
-    last_body_boxes = []
-    last_face_results = []
-    failure_count = 0
-    # Increase failure threshold for multi-viewer stability (was 20)
-    # Higher value prevents frequent reopen attempts that fail on Windows DirectShow
-    max_failures_before_reopen = 100
-    frames_yielded = 0
+        print(f"✅ Shared capture thread for {camera_id} initialized")
 
-    print(f"🎥 Starting video stream for {camera_id} (detection interval: {detection_interval} frames)")
-    
-    # Yield first frame immediately to establish connection
-    if first_valid_frame is not None:
-        try:
-            encode_params = [cv2.IMWRITE_JPEG_QUALITY, jpeg_quality]
-            ret, jpeg = cv2.imencode('.jpg', first_valid_frame, encode_params)
-            if ret:
-                frame_bytes = b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + jpeg.tobytes() + b'\r\n'
-                yield frame_bytes
-                frames_yielded += 1
-                print(f"✅ First frame yielded for {camera_id} (size: {len(jpeg.tobytes())} bytes)")
-                # Small delay to ensure connection is established
-                time.sleep(0.1)
-        except Exception as e:
-            print(f"⚠️  Failed to yield first frame for {camera_id}: {e}")
-    else:
-        print(f"⚠️  No valid frame captured during warmup for {camera_id}")
+        while not stop_event.is_set():
+            success, frame = cap.read()
+            if not success or frame is None:
+                time.sleep(0.01)
+                continue
 
-    try:
-        while True:
-            try:
-                success, frame = cap.read()
-                
-                # Comprehensive frame validation
-                if not success:
-                    failure_count += 1
-                    if failure_count >= max_failures_before_reopen:
-                        print(f"⚠️  Camera {camera_index} read failed {failure_count} times, attempting to reopen...")
-                        try:
-                            cap.release()
-                        except Exception:
-                            pass
-                        try:
-                            cap, _ = _open_video_capture_by_index(camera_index)
-                            try:
-                                cap.set(cv2.CAP_PROP_FRAME_WIDTH, target_width)
-                                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, target_height)
-                                cap.set(cv2.CAP_PROP_FPS, 30)
-                                cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-                            except Exception:
-                                pass
-                            failure_count = 0
-                            time.sleep(0.1)  # Brief pause after reopen
-                            continue
-                        except Exception as e:
-                            print(f"⚠️  Failed to reopen camera {camera_index}: {e}")
-                            time.sleep(0.5)  # Longer wait before retry
-                    else:
-                        time.sleep(0.01)
-                    continue
-                
-                # Check if frame is None
-                if frame is None:
-                    failure_count += 1
-                    if failure_count >= max_failures_before_reopen:
-                        print(f"⚠️  Camera {camera_index} returning None frames, attempting to reopen...")
-                        try:
-                            cap.release()
-                        except Exception:
-                            pass
-                        try:
-                            cap, _ = _open_video_capture_by_index(camera_index)
-                            try:
-                                cap.set(cv2.CAP_PROP_FRAME_WIDTH, target_width)
-                                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, target_height)
-                                cap.set(cv2.CAP_PROP_FPS, 30)
-                                cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-                            except Exception:
-                                pass
-                            failure_count = 0
-                            time.sleep(0.1)
-                            continue
-                        except Exception as e:
-                            print(f"⚠️  Failed to reopen camera {camera_index}: {e}")
-                            time.sleep(0.5)
-                    else:
-                        time.sleep(0.01)
-                    continue
-                
-                # Check frame size and validity
-                try:
-                    if not hasattr(frame, 'size') or frame.size == 0:
-                        failure_count += 1
-                        if failure_count >= max_failures_before_reopen:
-                            print(f"⚠️  Camera {camera_index} returning invalid frames (size=0), attempting to reopen...")
-                            try:
-                                cap.release()
-                            except Exception:
-                                pass
-                            try:
-                                cap, _ = _open_video_capture_by_index(camera_index)
-                                try:
-                                    cap.set(cv2.CAP_PROP_FRAME_WIDTH, target_width)
-                                    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, target_height)
-                                    cap.set(cv2.CAP_PROP_FPS, 30)
-                                    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-                                except Exception:
-                                    pass
-                                failure_count = 0
-                                time.sleep(0.1)
-                                continue
-                            except Exception as e:
-                                print(f"⚠️  Failed to reopen camera {camera_index}: {e}")
-                                time.sleep(0.5)
-                        else:
-                            time.sleep(0.01)
-                        continue
-                    
-                    # Validate frame dimensions
-                    if len(frame.shape) < 2 or frame.shape[0] <= 0 or frame.shape[1] <= 0:
-                        failure_count += 1
-                        if failure_count >= max_failures_before_reopen:
-                            print(f"⚠️  Camera {camera_index} returning invalid frame dimensions, attempting to reopen...")
-                            try:
-                                cap.release()
-                            except Exception:
-                                pass
-                            try:
-                                cap, _ = _open_video_capture_by_index(camera_index)
-                                try:
-                                    cap.set(cv2.CAP_PROP_FRAME_WIDTH, target_width)
-                                    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, target_height)
-                                    cap.set(cv2.CAP_PROP_FPS, 30)
-                                    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-                                except Exception:
-                                    pass
-                                failure_count = 0
-                                time.sleep(0.1)
-                                continue
-                            except Exception as e:
-                                print(f"⚠️  Failed to reopen camera {camera_index}: {e}")
-                                time.sleep(0.5)
-                        else:
-                            time.sleep(0.01)
-                        continue
-                except (AttributeError, IndexError, TypeError) as e:
-                    # Frame object is invalid
-                    failure_count += 1
-                    if failure_count >= max_failures_before_reopen:
-                        print(f"⚠️  Camera {camera_index} frame validation failed: {e}, attempting to reopen...")
-                        try:
-                            cap.release()
-                        except Exception:
-                            pass
-                        try:
-                            cap, _ = _open_video_capture_by_index(camera_index)
-                            try:
-                                cap.set(cv2.CAP_PROP_FRAME_WIDTH, target_width)
-                                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, target_height)
-                                cap.set(cv2.CAP_PROP_FPS, 30)
-                                cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-                            except Exception:
-                                pass
-                            failure_count = 0
-                            time.sleep(0.1)
-                            continue
-                        except Exception as e2:
-                            print(f"⚠️  Failed to reopen camera {camera_index}: {e2}")
-                            time.sleep(0.5)
-                    else:
-                        time.sleep(0.01)
-                    continue
-                
-                # Frame is valid - reset failure counter and continue processing
-                failure_count = 0
-                
-                # Continue with frame processing (frame_skip increment and detection)
-                frame_skip += 1
+            frame_count += 1
 
-                # Update camera status periodically (every 30 frames)
-                if frame_skip % 30 == 0:
-                    _update_camera_status(camera_id)
+            # Check camera role - skip detection for "live" cameras
+            camera_role = _cameras.get(camera_id).role if camera_id in _cameras else "none"
 
-                # Check camera role - skip detection for "live" cameras
-                camera_role = _cameras.get(camera_id).role if camera_id in _cameras else "none"
-
-                # Only perform detection if camera is not in "live" mode
-                if camera_role != "live":
-                    if frame_skip % detection_interval == 0:
-                        env_conf = os.getenv("DETECT_CONF_THRESHOLD")
-                        eff_conf = float(env_conf) if env_conf is not None else conf_threshold
-
-                        # Use lock to prevent concurrent model access from multiple camera streams
-                        # Keep lock acquisition quick - detection is already staggered by interval
+            # Only perform detection if camera is not in "live" mode
+            if camera_role != "live":
+                # Perform detection every N frames
+                if frame_count % detection_interval == 0:
+                    try:
                         with _detector_lock:
-                            last_body_boxes = body_det.detect(frame, eff_conf)
+                            last_body_boxes = body_det.detect(frame, 0.3)
 
+                        height, width = frame.shape[:2]
                         last_face_results = []
                         if last_body_boxes:
                             for bx in last_body_boxes:
@@ -1434,150 +1451,181 @@ def generate_mjpeg_for_camera(camera_index: int, conf_threshold: float = 0.3):
                                 margin = 10
                                 region = frame[max(0, y1-margin):min(height, y2+margin),
                                              max(0, x1-margin):min(width, x2+margin)]
-                                if region.size == 0:
-                                    continue
+                                if region.size > 0:
+                                    with _detector_lock:
+                                        locs = face_rec.detect_faces(region)
+                                        adjusted = [(t+max(0, y1-margin), r+max(0, x1-margin),
+                                                   b+max(0, y1-margin), l+max(0, x1-margin)) for t, r, b, l in locs]
+                                        if adjusted:
+                                            last_face_results.extend(face_rec.recognize_faces(frame, adjusted))
+                    except Exception as e:
+                        print(f"⚠️  Detection error in {camera_id}: {e}")
 
-                                # Use lock for face detection/recognition to prevent concurrent access
-                                with _detector_lock:
-                                    locs = face_rec.detect_faces(region)
-                                    adjusted = [(t+max(0, y1-margin), r+max(0, x1-margin),
-                                               b+max(0, y1-margin), l+max(0, x1-margin)) for t, r, b, l in locs]
-                                    if adjusted:
-                                        last_face_results.extend(face_rec.recognize_faces(frame, adjusted))
-
-                    frame = body_det.draw_boxes(frame, last_body_boxes)
-                    frame = face_rec.draw_faces(frame, last_face_results)
-                # For "live" cameras, skip all detection and drawing - just show raw video
-
-                # Only log to database every 2nd detection cycle to reduce database writes
-                # Skip logging for "live" cameras (no detection/attendance tracking)
-                if camera_role != "live" and frame_skip % (detection_interval * 2) == 0:
-                    try:
-                        # Get camera role for entry/exit tracking
-                        entry_type = _cameras.get(camera_id).role if camera_id in _cameras else None
-                        if entry_type == "none":
-                            entry_type = None
-
-                        if last_face_results:
-                            for (_t, _r, _b, _l), name in last_face_results:
-                                # Log both recognized and unknown faces to database
-                                emp_id = face_rec.known_face_ids.get(name, name) if name and name != "Unknown" else "Unknown"
-                                record = AttendanceRecord(
-                                    employee_id=emp_id,
-                                    name=name if name else "Unknown",
-                                    timestamp=get_bangladesh_timestamp(),
-                                    camera_id=camera_id,
-                                    entry_type=entry_type
-                                )
-                                save_attendance_to_db(record)
-                        else:
-                            # No faces found but bodies detected — log Unknown entries so UI shows activity
-                            # Only log one unknown per detection cycle to reduce database load
-                            if last_body_boxes and len(last_body_boxes) > 0:
-                                record = AttendanceRecord(
-                                    employee_id="Unknown",
-                                    name="Unknown",
-                                    timestamp=get_bangladesh_timestamp(),
-                                    camera_id=camera_id,
-                                    entry_type=entry_type
-                                )
-                                save_attendance_to_db(record)
-                    except Exception:
-                        pass
-
-                encode_params = [cv2.IMWRITE_JPEG_QUALITY, jpeg_quality]
-                ret, jpeg = cv2.imencode('.jpg', frame, encode_params)
-                if not ret:
-                    print(f"⚠️  Failed to encode frame for {camera_id}")
-                    continue
-                
-                # Yield the frame
-                frame_bytes = b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + jpeg.tobytes() + b'\r\n'
-                yield frame_bytes
-                frames_yielded += 1
-                
-                # Debug: log every 100 frames
-                if frames_yielded % 100 == 0:
-                    print(f"📹 {camera_id}: {frames_yielded} frames yielded")
-                
-            except cv2.error as e:
-                # Catch OpenCV errors specifically
-                failure_count += 1
-                error_msg = str(e)
-                if "Assertion failed" in error_msg or "_step >= minstep" in error_msg:
-                    print(f"⚠️  Camera {camera_index} OpenCV error (likely MSMF issue): {error_msg[:100]}")
-                    if failure_count >= max_failures_before_reopen:
-                        print(f"⚠️  Attempting to reopen camera {camera_index} due to OpenCV errors...")
-                        try:
-                            cap.release()
-                        except Exception:
-                            pass
-                        try:
-                            cap, _ = _open_video_capture_by_index(camera_index)
+                # Log attendance for recognized faces (avoid duplicates within 5 seconds)
+                if last_face_results and camera_role in ["entry", "exit"]:
+                    current_time = time.time()
+                    for face_location, face_name in last_face_results:
+                        # Check if we've logged this person recently
+                        last_log_time = _last_attendance_log[camera_id].get(face_name, 0)
+                        if current_time - last_log_time >= 5.0:  # 5 second cooldown
                             try:
-                                cap.set(cv2.CAP_PROP_FRAME_WIDTH, target_width)
-                                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, target_height)
-                                cap.set(cv2.CAP_PROP_FPS, 30)
-                                cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-                            except Exception:
-                                pass
-                            failure_count = 0
-                            time.sleep(0.2)  # Longer pause after OpenCV error
-                            continue
-                        except Exception as e2:
-                            print(f"⚠️  Failed to reopen camera {camera_index}: {e2}")
-                            time.sleep(1.0)  # Even longer wait
-                    else:
-                        time.sleep(0.05)
-                else:
-                    # Other OpenCV errors
-                    print(f"⚠️  Camera {camera_index} OpenCV error: {error_msg[:100]}")
-                    time.sleep(0.1)
-                continue
-            except Exception as e:
-                # Catch any other unexpected errors
-                failure_count += 1
-                print(f"⚠️  Camera {camera_index} unexpected error: {type(e).__name__}: {str(e)[:100]}")
-                if failure_count >= max_failures_before_reopen:
-                    try:
-                        cap.release()
-                    except Exception:
-                        pass
-                    try:
-                        cap, _ = _open_video_capture_by_index(camera_index)
-                        try:
-                            cap.set(cv2.CAP_PROP_FRAME_WIDTH, target_width)
-                            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, target_height)
-                            cap.set(cv2.CAP_PROP_FPS, 30)
-                            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-                        except Exception:
-                            pass
-                        failure_count = 0
-                        time.sleep(0.2)
-                        continue
-                    except Exception as e2:
-                        print(f"⚠️  Failed to reopen camera {camera_index}: {e2}")
-                        time.sleep(1.0)
-                else:
-                    time.sleep(0.05)
-                continue
+                                # Get employee ID
+                                employee_id = face_rec.known_face_ids.get(face_name, face_name) if face_name != "Unknown" else "Unknown"
+
+                                # Create attendance record
+                                attendance_record = AttendanceRecord(
+                                    employee_id=employee_id,
+                                    name=face_name,
+                                    timestamp=get_bangladesh_timestamp(),
+                                    camera_id=camera_id,
+                                    entry_type=camera_role
+                                )
+
+                                # Save to database
+                                save_attendance_to_db(attendance_record)
+                                _last_attendance_log[camera_id][face_name] = current_time
+
+                                print(f"✅ [{camera_id}] Logged attendance: {face_name} ({employee_id}) as {camera_role}")
+                            except Exception as e:
+                                print(f"⚠️  Failed to log attendance for {face_name}: {e}")
+
+                # Draw detection overlays
+                frame = body_det.draw_boxes(frame, last_body_boxes)
+                frame = face_rec.draw_faces(frame, last_face_results)
+            # For "live" cameras, skip all detection and drawing - just show raw video
+
+            # Encode to JPEG
+            ret, jpeg = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
+            if ret:
+                # Store JPEG frame for ALL viewers to read
+                _latest_frames[camera_index] = jpeg.tobytes()
+                frame_ready.set()  # Signal that new frame is available
+
+            time.sleep(0.01)  # Small delay to prevent CPU overload
+
     except Exception as e:
-        print(f"❌ Stream error for {camera_id}: {e}")
+        print(f"❌ Shared capture thread error for {camera_id}: {e}")
+        import traceback
+        traceback.print_exc()
+    finally:
+        try:
+            cap.release()
+        except:
+            pass
+        print(f"🛑 Shared capture thread for {camera_id} stopped")
+
+
+def generate_mjpeg_for_camera(camera_index: int, conf_threshold: float = 0.3):
+    """
+    Generate MJPEG video stream for specific camera.
+    NEW: Uses shared capture thread - unlimited viewers supported!
+    """
+    camera_id = f"CAM-{camera_index}"
+    import numpy as np
+    camera_lock = _camera_locks[camera_index]
+
+    # Track viewer connection
+    with camera_lock:
+        viewer_count = _active_camera_streams.get(camera_index, 0)
+        if isinstance(viewer_count, bool):
+            viewer_count = 1 if viewer_count else 0
+        _active_camera_streams[camera_index] = viewer_count + 1
+        my_viewer_number = viewer_count + 1
+        print(f"✅ Camera {camera_index} viewer #{my_viewer_number} connected (total: {my_viewer_number}) [SHARED MODE]")
+
+        # Start shared capture thread if this is the first viewer
+        if camera_index not in _capture_threads or not _capture_threads[camera_index].is_alive():
+            print(f"🎬 Starting shared capture thread for camera {camera_index}...")
+            _thread_stop_events[camera_index] = threading.Event()
+            _frame_ready_events[camera_index] = threading.Event()
+            thread = threading.Thread(target=_camera_capture_thread, args=(camera_index,), daemon=True)
+            _capture_threads[camera_index] = thread
+            thread.start()
+            time.sleep(0.5)  # Give thread time to initialize
+
+    # Wait for first frame to be available
+    frame_ready = _frame_ready_events.get(camera_index)
+    if frame_ready:
+        frame_ready.wait(timeout=5.0)  # Wait up to 5 seconds for first frame
+
+    # NEW: Read frames from shared buffer instead of opening camera
+    print(f"📡 Viewer #{my_viewer_number} streaming from shared capture thread for {camera_id}")
+
+    frames_yielded = 0
+    last_frame_time = time.time()
+    no_frame_count = 0
+    max_no_frame_wait = 100  # Max iterations to wait for frames before giving up
+
+    try:
+        while True:
+            try:
+                # Get latest frame from shared buffer
+                if camera_index in _latest_frames:
+                    frame_bytes = _latest_frames[camera_index]
+
+                    # Yield the JPEG frame as MJPEG multipart
+                    yield (b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
+                    frames_yielded += 1
+                    no_frame_count = 0  # Reset no-frame counter
+                    last_frame_time = time.time()
+
+                    # Log progress every 100 frames
+                    if frames_yielded % 100 == 0:
+                        print(f"📹 {camera_id} viewer #{my_viewer_number}: {frames_yielded} frames streamed")
+
+                    # Small delay to control frame rate (~30 FPS)
+                    time.sleep(0.033)
+                else:
+                    # No frame available yet - wait briefly
+                    no_frame_count += 1
+                    if no_frame_count > max_no_frame_wait:
+                        print(f"⚠️  {camera_id} viewer #{my_viewer_number}: No frames after {max_no_frame_wait} attempts")
+                        # Return error frame
+                        import numpy as np
+                        error_frame = np.zeros((480, 640, 3), dtype=np.uint8)
+                        cv2.putText(error_frame, "Camera Not Available", (100, 200),
+                                   cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 0, 255), 3)
+                        cv2.putText(error_frame, f"{camera_id}", (220, 250),
+                                   cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+                        ret, jpeg = cv2.imencode('.jpg', error_frame)
+                        if ret:
+                            yield (b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + jpeg.tobytes() + b'\r\n')
+                        time.sleep(1.0)
+                        no_frame_count = 0  # Reset to try again
+                    else:
+                        time.sleep(0.1)
+
+            except GeneratorExit:
+                # Client disconnected normally
+                print(f"🛑 {camera_id} viewer #{my_viewer_number} disconnected normally")
+                break
+            except Exception as e:
+                print(f"⚠️  {camera_id} viewer #{my_viewer_number} stream error: {e}")
+    except Exception as e:
+        print(f"❌ Stream error for {camera_id} viewer #{my_viewer_number}: {e}")
         import traceback
         traceback.print_exc()
     finally:
         # Decrement viewer count when stream ends
-        with camera_lock:
-            viewer_count = _active_camera_streams.get(camera_index, 1)
-            if isinstance(viewer_count, bool):
-                viewer_count = 1 if viewer_count else 0
-            new_count = max(0, viewer_count - 1)
-            _active_camera_streams[camera_index] = new_count
-            print(f"🛑 Viewer disconnected from camera {camera_index} (remaining viewers: {new_count})")
-            try:
-                cap.release()
-            except:
-                pass
+        try:
+            with camera_lock:
+                viewer_count = _active_camera_streams.get(camera_index, 1)
+                if isinstance(viewer_count, bool):
+                    viewer_count = 1 if viewer_count else 0
+                new_count = max(0, viewer_count - 1)
+                _active_camera_streams[camera_index] = new_count
+                print(f"🛑 {camera_id} viewer #{my_viewer_number} disconnected (remaining viewers: {new_count})")
+
+                # Stop background capture thread if no more viewers
+                if new_count == 0 and camera_index in _thread_stop_events:
+                    print(f"🛑 No more viewers for {camera_id}, stopping capture thread...")
+                    _thread_stop_events[camera_index].set()
+                    # Clean up shared resources
+                    if camera_index in _latest_frames:
+                        del _latest_frames[camera_index]
+                    print(f"✅ {camera_id} capture thread stopped and cleaned up")
+        except Exception as e:
+            print(f"⚠️  Error cleaning up viewer for {camera_id}: {e}")
 
 @app.get("/video_feed")
 async def video_feed():
@@ -1893,8 +1941,9 @@ async def list_cameras():
             except (ValueError, IndexError):
                 # Not a physical camera (CAM-{index}), keep current status
                 pass
-    
-    return list(_cameras.values())
+
+    # Only return cameras that were actually discovered (physically exist)
+    return [camera for camera in _cameras.values() if camera.id in _discovered_cameras]
 
 def _auto_discover_cameras():
     """Auto-discover and register all available cameras at startup"""
@@ -1923,6 +1972,9 @@ def _auto_discover_cameras():
                         # Update existing camera to online
                         _cameras[camera_id].status = "online"
                         save_camera_to_db(_cameras[camera_id])
+
+                    # Track that this camera was discovered
+                    _discovered_cameras.add(camera_id)
 
                     available_cameras.append({
                         "index": idx,

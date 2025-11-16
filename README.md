@@ -1,4 +1,4 @@
-# 🎯 Lex Vision - CCTV Body and Face Detection System
+# 🎯 LexVision - CCTV Body and Face Detection System
 
 A real-time CCTV monitoring system with automatic body detection and face recognition for employee attendance tracking.
 

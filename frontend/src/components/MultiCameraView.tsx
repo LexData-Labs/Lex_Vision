@@ -10,10 +10,25 @@ interface MultiCameraViewProps {
 
 export function MultiCameraView({ cameras }: MultiCameraViewProps) {
   const [activeCameras, setActiveCameras] = useState<CameraConfig[]>([]);
+  const [videoKeys, setVideoKeys] = useState<Record<string, number>>({});
+  const [retryTimestamps, setRetryTimestamps] = useState<Record<string, number>>({});
 
   useEffect(() => {
     // Filter only online cameras
-    setActiveCameras(cameras.filter(cam => cam.status === "online"));
+    const onlineCameras = cameras.filter(cam => cam.status === "online");
+    setActiveCameras(onlineCameras);
+
+    // Initialize video keys ONLY for NEW cameras (don't reset existing ones)
+    setVideoKeys(prev => {
+      const keys = { ...prev };
+      onlineCameras.forEach(cam => {
+        // Only add if this camera doesn't have a key yet
+        if (!keys[cam.id]) {
+          keys[cam.id] = Date.now();
+        }
+      });
+      return keys;
+    });
   }, [cameras]);
 
   const getCameraIndex = (cameraId: string): number | undefined => {
@@ -58,13 +73,31 @@ export function MultiCameraView({ cameras }: MultiCameraViewProps) {
     }`}>
       {activeCameras.map((camera) => {
         const cameraIndex = getCameraIndex(camera.id);
-        const videoUrl = cameraIndex !== undefined
+        const baseUrl = cameraIndex !== undefined
           ? api.getVideoFeedUrl(cameraIndex)
           : api.getVideoFeedUrl();
 
+        // Add cache-busting timestamp and retry timestamp
+        const cacheBuster = videoKeys[camera.id] || Date.now();
+        const retryTs = retryTimestamps[camera.id] || 0;
+        const videoUrl = `${baseUrl}?t=${cacheBuster}&retry=${retryTs}`;
+
+        const handleVideoError = (e: any) => {
+          console.error(`[MultiCameraView] Camera ${camera.id} video load error:`, e);
+          console.error(`[MultiCameraView] Camera ${camera.id} URL was: ${videoUrl}`);
+
+          // Retry after 2 seconds
+          setTimeout(() => {
+            console.log(`[MultiCameraView] Camera ${camera.id} retrying...`);
+            setRetryTimestamps(prev => ({
+              ...prev,
+              [camera.id]: Date.now()
+            }));
+          }, 2000);
+        };
 
         return (
-          <Card key={camera.id} className="bg-gradient-card border-0 shadow-elegant">
+          <Card key={`${camera.id}-${cacheBuster}`} className="bg-gradient-card border-0 shadow-elegant">
             <CardHeader className="pb-3">
               <div className="flex items-center justify-between">
                 <CardTitle className="text-lg flex items-center gap-2">
@@ -77,18 +110,14 @@ export function MultiCameraView({ cameras }: MultiCameraViewProps) {
             <CardContent>
               <div className="relative aspect-video bg-black rounded-lg overflow-hidden">
                 <img
+                  key={videoUrl}
                   src={videoUrl}
                   alt={camera.name}
                   className="w-full h-full object-contain"
                   onLoad={() => {
-                    console.log(`[MultiCameraView] Camera ${camera.id} video loaded successfully`);
+                    console.log(`[MultiCameraView] Camera ${camera.id} video loaded successfully from ${videoUrl}`);
                   }}
-                  onError={(e) => {
-                    const target = e.target as HTMLImageElement;
-                    console.error(`[MultiCameraView] Camera ${camera.id} video load error. URL was:`, videoUrl);
-                    console.error(`[MultiCameraView] Error details:`, e);
-                    target.src = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='200' height='200'%3E%3Crect fill='%23333' width='200' height='200'/%3E%3Ctext fill='%23fff' x='50%25' y='50%25' text-anchor='middle' dominant-baseline='middle'%3ECamera Offline%3C/text%3E%3C/svg%3E";
-                  }}
+                  onError={handleVideoError}
                 />
                 <div className="absolute bottom-2 left-2 bg-black/70 text-white px-2 py-1 rounded text-xs">
                   {camera.id}

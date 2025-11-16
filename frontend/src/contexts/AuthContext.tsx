@@ -5,6 +5,8 @@ import { api } from '@/services/api';
 export interface User {
   username: string;
   role: 'administrator' | 'employee';
+  employee_id: string;
+  password_reset_required: boolean;
 }
 
 interface AuthContextType {
@@ -13,6 +15,7 @@ interface AuthContextType {
   logout: () => void;
   isAuthenticated: boolean;
   isLoading: boolean;
+  sessionToken: string | null;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
@@ -31,58 +34,70 @@ interface AuthProviderProps {
 
 export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
   const [user, setUser] = useState<User | null>(null);
+  const [sessionToken, setSessionToken] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const navigate = useNavigate();
 
-  // Tokens are mocked by backend for now; we store only role and username
-
   useEffect(() => {
+    const storedToken = sessionStorage.getItem('sessionToken');
     const storedUsername = sessionStorage.getItem('username');
     const storedUserRole = sessionStorage.getItem('userRole');
-    
-    if (storedUsername && storedUserRole) {
+    const storedEmployeeId = sessionStorage.getItem('employeeId');
+    const storedPasswordReset = sessionStorage.getItem('passwordResetRequired');
+
+    if (storedToken && storedUsername && storedUserRole && storedEmployeeId) {
+      setSessionToken(storedToken);
       setUser({
         username: storedUsername,
-        role: storedUserRole as 'administrator' | 'employee'
+        role: storedUserRole as 'administrator' | 'employee',
+        employee_id: storedEmployeeId,
+        password_reset_required: storedPasswordReset === 'true'
       });
     }
     setIsLoading(false);
   }, []);
 
   const login = async (username: string, password: string): Promise<boolean> => {
-    // Always allow non-empty credentials as a fallback to avoid blocking login
-    const fallback = () => {
-      if (!username || !password) return false;
-      const role = username.toLowerCase() === 'admin' ? 'administrator' : 'employee';
-      const nextUser = { username, role } as User;
-      setUser(nextUser);
-      sessionStorage.setItem('username', nextUser.username);
-      sessionStorage.setItem('userRole', nextUser.role);
-      const dashboardPath = role === 'administrator' ? '/admin/dashboard' : '/employee/dashboard';
-      navigate(dashboardPath);
-      return true;
-    };
-
     try {
       const res = await api.login({ username, password });
       const role = (res.role === 'administrator' || res.role === 'employee') ? res.role : 'employee';
-      const nextUser = { username, role } as User;
+
+      const nextUser: User = {
+        username: res.name,
+        role: role,
+        employee_id: res.employee_id,
+        password_reset_required: res.password_reset_required
+      };
+
+      // Store in state
       setUser(nextUser);
+      setSessionToken(res.access_token);
+
+      // Store in sessionStorage
+      sessionStorage.setItem('sessionToken', res.access_token);
       sessionStorage.setItem('username', nextUser.username);
       sessionStorage.setItem('userRole', nextUser.role);
+      sessionStorage.setItem('employeeId', nextUser.employee_id);
+      sessionStorage.setItem('passwordResetRequired', String(nextUser.password_reset_required));
+
+      // Navigate to appropriate dashboard
       const dashboardPath = role === 'administrator' ? '/admin/dashboard' : '/employee/dashboard';
       navigate(dashboardPath);
       return true;
-    } catch {
-      // Fallback to local login if backend is unreachable or returns error
-      return fallback();
+    } catch (error) {
+      console.error('Login failed:', error);
+      return false;
     }
   };
 
   const logout = () => {
     setUser(null);
+    setSessionToken(null);
+    sessionStorage.removeItem('sessionToken');
     sessionStorage.removeItem('username');
     sessionStorage.removeItem('userRole');
+    sessionStorage.removeItem('employeeId');
+    sessionStorage.removeItem('passwordResetRequired');
     navigate('/login');
   };
 
@@ -91,7 +106,8 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
     login,
     logout,
     isAuthenticated: !!user,
-    isLoading
+    isLoading,
+    sessionToken
   };
 
   return (

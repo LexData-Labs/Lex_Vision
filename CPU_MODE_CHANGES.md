@@ -1,7 +1,7 @@
 # CPU Mode Configuration - Summary of Changes
 
 ## Overview
-The Lex Vision system has been configured to run in **CPU-only mode by default**. This makes the system more accessible and eliminates the need for NVIDIA GPU hardware and CUDA drivers.
+The LexVision system has been configured to run in **CPU-only mode by default**. This makes the system more accessible and eliminates the need for NVIDIA GPU hardware and CUDA drivers.
 
 ## Changes Made
 
