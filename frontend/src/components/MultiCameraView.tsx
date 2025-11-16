@@ -10,15 +10,6 @@ interface MultiCameraViewProps {
 
 export function MultiCameraView({ cameras }: MultiCameraViewProps) {
   const [activeCameras, setActiveCameras] = useState<CameraConfig[]>([]);
-  const [fallback, setFallback] = useState<Record<string, boolean>>({});
-  const [tick, setTick] = useState(0);
-  useEffect(() => {
-    const anyFallback = Object.values(fallback).some(Boolean);
-    if (anyFallback) {
-      const id = setInterval(() => setTick((t) => t + 1), 800);
-      return () => clearInterval(id);
-    }
-  }, [fallback]);
 
   useEffect(() => {
     // Filter only online cameras
@@ -37,6 +28,8 @@ export function MultiCameraView({ cameras }: MultiCameraViewProps) {
         return <Badge className="bg-green-500">Entry</Badge>;
       case "exit":
         return <Badge className="bg-blue-500">Exit</Badge>;
+      case "live":
+        return <Badge className="bg-purple-500">Live View</Badge>;
       default:
         return <Badge variant="secondary">General</Badge>;
     }
@@ -68,7 +61,6 @@ export function MultiCameraView({ cameras }: MultiCameraViewProps) {
         const videoUrl = cameraIndex !== undefined
           ? api.getVideoFeedUrl(cameraIndex)
           : api.getVideoFeedUrl();
-        const snapshotUrl = videoUrl.replace('/video_feed', '/snapshot') + `?cb=${tick}`;
 
 
         return (
@@ -85,14 +77,17 @@ export function MultiCameraView({ cameras }: MultiCameraViewProps) {
             <CardContent>
               <div className="relative aspect-video bg-black rounded-lg overflow-hidden">
                 <img
-                  src={fallback[camera.id] ? snapshotUrl : videoUrl}
+                  src={videoUrl}
                   alt={camera.name}
                   className="w-full h-full object-contain"
                   onLoad={() => {
-                    console.log(`[MultiCameraView] Camera ${camera.id} ${fallback[camera.id] ? 'snapshot' : 'video'} loaded successfully`);
+                    console.log(`[MultiCameraView] Camera ${camera.id} video loaded successfully`);
                   }}
-                  onError={() => {
-                    setFallback((prev) => ({ ...prev, [camera.id]: true }));
+                  onError={(e) => {
+                    const target = e.target as HTMLImageElement;
+                    console.error(`[MultiCameraView] Camera ${camera.id} video load error. URL was:`, videoUrl);
+                    console.error(`[MultiCameraView] Error details:`, e);
+                    target.src = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='200' height='200'%3E%3Crect fill='%23333' width='200' height='200'/%3E%3Ctext fill='%23fff' x='50%25' y='50%25' text-anchor='middle' dominant-baseline='middle'%3ECamera Offline%3C/text%3E%3C/svg%3E";
                   }}
                 />
                 <div className="absolute bottom-2 left-2 bg-black/70 text-white px-2 py-1 rounded text-xs">

@@ -45,6 +45,7 @@ export default function AdminSettings() {
   });
 
   const [cameras, setCameras] = useState<CameraConfig[]>([]);
+  const [cameraError, setCameraError] = useState<string | null>(null);
 
   // Save models to localStorage whenever models change
   useEffect(() => {
@@ -55,12 +56,30 @@ export default function AdminSettings() {
   useEffect(() => {
     const fetchCameras = async () => {
       try {
+        console.log('Fetching cameras from API...');
         const camerasData = await api.cameras();
         console.log('Fetched cameras:', camerasData);
-        setCameras(camerasData);
+        console.log('Number of cameras:', camerasData?.length);
+
+        if (Array.isArray(camerasData)) {
+          setCameras(camerasData);
+          setCameraError(null);
+          console.log('Cameras state updated successfully');
+        } else {
+          console.error('API returned non-array data:', camerasData);
+          setCameras([]);
+          setCameraError('Invalid data format received from server');
+        }
       } catch (error) {
+        const errorMsg = error instanceof Error ? error.message : String(error);
         console.error('Failed to fetch cameras:', error);
+        console.error('Error details:', {
+          name: error?.name,
+          message: error?.message,
+          stack: error?.stack
+        });
         setCameras([]);
+        setCameraError(`Failed to fetch cameras: ${errorMsg}`);
       }
     };
 
@@ -143,7 +162,7 @@ export default function AdminSettings() {
     setModels(models.filter(model => model.id !== id));
   };
 
-  const updateCameraRole = async (cameraId: string, role: "entry" | "exit" | "none") => {
+  const updateCameraRole = async (cameraId: string, role: "entry" | "exit" | "live" | "none") => {
     try {
       // Update on backend
       await api.updateCamera(cameraId, role);
@@ -171,6 +190,8 @@ export default function AdminSettings() {
         return <Badge className="bg-green-500">Entry</Badge>;
       case "exit":
         return <Badge className="bg-blue-500">Exit</Badge>;
+      case "live":
+        return <Badge className="bg-purple-500">Live View</Badge>;
       default:
         return <Badge variant="secondary">Not Assigned</Badge>;
     }
@@ -364,11 +385,20 @@ export default function AdminSettings() {
             </CardHeader>
             <CardContent>
               <div className="space-y-4">
+                {cameraError && (
+                  <div className="p-4 bg-red-50 dark:bg-red-950 rounded-lg border border-red-200 dark:border-red-800">
+                    <p className="text-sm text-red-600 dark:text-red-400">{cameraError}</p>
+                    <p className="text-xs text-red-500 dark:text-red-500 mt-1">Check browser console (F12) for more details</p>
+                  </div>
+                )}
                 {cameras.length === 0 ? (
                   <div className="text-center py-8 text-muted-foreground">
                     <Camera className="h-12 w-12 mx-auto mb-4 opacity-50" />
                     <p className="text-lg font-medium">No cameras detected</p>
                     <p className="text-sm">Cameras will appear here when they are active</p>
+                    {!cameraError && (
+                      <p className="text-xs mt-2">Backend API: http://localhost:8000/cameras</p>
+                    )}
                   </div>
                 ) : (
                   cameras.map((camera) => (
@@ -404,7 +434,7 @@ export default function AdminSettings() {
                         </Label>
                         <Select
                           value={camera.role}
-                          onValueChange={(value) => updateCameraRole(camera.id, value as "entry" | "exit" | "none")}
+                          onValueChange={(value) => updateCameraRole(camera.id, value as "entry" | "exit" | "live" | "none")}
                         >
                           <SelectTrigger id={`camera-${camera.id}`}>
                             <SelectValue placeholder="Select role" />
@@ -413,6 +443,7 @@ export default function AdminSettings() {
                             <SelectItem value="none">Not Assigned</SelectItem>
                             <SelectItem value="entry">Entry Camera</SelectItem>
                             <SelectItem value="exit">Exit Camera</SelectItem>
+                            <SelectItem value="live">Live View (No Detection)</SelectItem>
                           </SelectContent>
                         </Select>
                       </div>
@@ -428,8 +459,9 @@ export default function AdminSettings() {
                   Camera Role Information
                 </h4>
                 <ul className="text-sm text-muted-foreground space-y-1">
-                  <li>• <strong>Entry Camera:</strong> Monitors people entering the facility</li>
-                  <li>• <strong>Exit Camera:</strong> Monitors people leaving the facility</li>
+                  <li>• <strong>Entry Camera:</strong> Monitors people entering the facility (with AI detection)</li>
+                  <li>• <strong>Exit Camera:</strong> Monitors people leaving the facility (with AI detection)</li>
+                  <li>• <strong>Live View:</strong> Shows raw video feed without AI detection or attendance tracking</li>
                   <li>• <strong>Not Assigned:</strong> Camera is active but not assigned to entry/exit tracking</li>
                 </ul>
               </div>

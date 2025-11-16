@@ -621,13 +621,6 @@ class FaceRecognizer:
                         if len(face_encodings) > 0:
                             self.known_face_encodings.append(face_encodings[0])
                             self.known_face_names.append(employee_name)
-                            try:
-                                base_no_ext = os.path.splitext(file)[0]
-                                parts = base_no_ext.split('_')
-                                if parts and parts[0].isdigit():
-                                    self.known_face_ids[employee_name] = parts[0]
-                            except Exception:
-                                pass
                             print(f"Loaded face for employee: {employee_name} from {file}")
                             face_found = True
                             continue
@@ -647,13 +640,6 @@ class FaceRecognizer:
                                 if len(face_encodings) > 0:
                                     self.known_face_encodings.append(face_encodings[0])
                                     self.known_face_names.append(employee_name)
-                                    try:
-                                        base_no_ext = os.path.splitext(file)[0]
-                                        parts = base_no_ext.split('_')
-                                        if parts and parts[0].isdigit():
-                                            self.known_face_ids[employee_name] = parts[0]
-                                    except Exception:
-                                        pass
                                     print(f"Loaded face for employee: {employee_name} from {file} (cascade)")
                                     face_found = True
                                     continue
@@ -787,7 +773,7 @@ class Alert(BaseModel):
 class CameraConfig(BaseModel):
     id: str
     name: str
-    role: str  # "entry", "exit", "none"
+    role: str  # "entry", "exit", "live", "none"
     status: str  # "online", "offline"
 
 # In-memory stores
@@ -801,8 +787,6 @@ _cameras: Dict[str, CameraConfig] = {}  # Camera configurations
 # Multi-camera support
 _active_camera_streams: Dict[int, bool] = {}  # Track which cameras are streaming
 _camera_locks: Dict[int, threading.Lock] = defaultdict(threading.Lock)  # Thread locks per camera
-_shared_caps: Dict[int, cv2.VideoCapture] = {}
-_camera_viewers: Dict[int, int] = defaultdict(int)
 
 def _load_employees_from_data():
     """
@@ -1139,44 +1123,38 @@ def _open_video_capture_by_index(camera_index: int):
 
     raise RuntimeError(f"❌ Could not open camera {camera_index} - all backends failed")
 
-def _get_or_open_shared_cap(camera_index: int):
-    if camera_index in _shared_caps:
-        cap = _shared_caps[camera_index]
-        if cap.isOpened():
-            _camera_viewers[camera_index] += 1
-            return cap, f"CAM-{camera_index}"
-        else:
-            try:
-                cap.release()
-            except:
-                pass
-            _shared_caps.pop(camera_index, None)
-    cap, cam_id = _open_video_capture_by_index(camera_index)
-    _shared_caps[camera_index] = cap
-    _camera_viewers[camera_index] = _camera_viewers.get(camera_index, 0) + 1
-    return cap, cam_id
-
 def generate_mjpeg_for_camera(camera_index: int, conf_threshold: float = 0.3):
     """Generate MJPEG video stream for specific camera with detection overlays"""
     camera_id = f"CAM-{camera_index}"
 
-    camera_lock = _camera_locks[camera_index]
-    with camera_lock:
-        _active_camera_streams[camera_index] = True
+    # MULTI-VIEWER MODE: Allow multiple devices/tabs to view the same camera
+    # Mark camera as active (used for status tracking only, not blocking)
     import numpy as np
+    camera_lock = _camera_locks[camera_index]
+
+    with camera_lock:
+        # Track that this camera has at least one viewer
+        viewer_count = _active_camera_streams.get(camera_index, 0)
+        if isinstance(viewer_count, bool):
+            viewer_count = 1 if viewer_count else 0
+        _active_camera_streams[camera_index] = viewer_count + 1
+        print(f"✅ Camera {camera_index} viewer connected (total viewers: {viewer_count + 1})")
 
     try:
         # Use shared global detectors instead of creating new ones
         body_det, face_rec = _get_global_detectors()
 
         # Open camera (lock already released, but camera is marked as active)
-        cap, _ = _get_or_open_shared_cap(camera_index)
+        cap, _ = _open_video_capture_by_index(camera_index)
         _update_camera_status(camera_id)
     except Exception as e:
         print(f"❌ Error initializing video stream for {camera_id}: {e}")
-        # Mark camera as inactive since opening failed
+        # Decrement viewer count since opening failed
         with camera_lock:
-            _active_camera_streams[camera_index] = False
+            viewer_count = _active_camera_streams.get(camera_index, 1)
+            if isinstance(viewer_count, bool):
+                viewer_count = 1 if viewer_count else 0
+            _active_camera_streams[camera_index] = max(0, viewer_count - 1)
         # Return error image as MJPEG
         import numpy as np
         error_frame = np.zeros((480, 640, 3), dtype=np.uint8)
@@ -1275,8 +1253,7 @@ def generate_mjpeg_for_camera(camera_index: int, conf_threshold: float = 0.3):
     try:
         while True:
             try:
-                with camera_lock:
-                    success, frame = cap.read()
+                success, frame = cap.read()
                 
                 # Comprehensive frame validation
                 if not success:
@@ -1428,38 +1405,45 @@ def generate_mjpeg_for_camera(camera_index: int, conf_threshold: float = 0.3):
                 if frame_skip % 30 == 0:
                     _update_camera_status(camera_id)
 
-                if frame_skip % detection_interval == 0:
-                    env_conf = os.getenv("DETECT_CONF_THRESHOLD")
-                    eff_conf = float(env_conf) if env_conf is not None else conf_threshold
+                # Check camera role - skip detection for "live" cameras
+                camera_role = _cameras.get(camera_id).role if camera_id in _cameras else "none"
 
-                    # Use lock to prevent concurrent model access from multiple camera streams
-                    # Keep lock acquisition quick - detection is already staggered by interval
-                    with _detector_lock:
-                        last_body_boxes = body_det.detect(frame, eff_conf)
+                # Only perform detection if camera is not in "live" mode
+                if camera_role != "live":
+                    if frame_skip % detection_interval == 0:
+                        env_conf = os.getenv("DETECT_CONF_THRESHOLD")
+                        eff_conf = float(env_conf) if env_conf is not None else conf_threshold
 
-                    last_face_results = []
-                    if last_body_boxes:
-                        for bx in last_body_boxes:
-                            x1, y1, x2, y2, _ = bx
-                            margin = 10
-                            region = frame[max(0, y1-margin):min(height, y2+margin),
-                                         max(0, x1-margin):min(width, x2+margin)]
-                            if region.size == 0:
-                                continue
+                        # Use lock to prevent concurrent model access from multiple camera streams
+                        # Keep lock acquisition quick - detection is already staggered by interval
+                        with _detector_lock:
+                            last_body_boxes = body_det.detect(frame, eff_conf)
 
-                            # Use lock for face detection/recognition to prevent concurrent access
-                            with _detector_lock:
-                                locs = face_rec.detect_faces(region)
-                                adjusted = [(t+max(0, y1-margin), r+max(0, x1-margin),
-                                           b+max(0, y1-margin), l+max(0, x1-margin)) for t, r, b, l in locs]
-                                if adjusted:
-                                    last_face_results.extend(face_rec.recognize_faces(frame, adjusted))
+                        last_face_results = []
+                        if last_body_boxes:
+                            for bx in last_body_boxes:
+                                x1, y1, x2, y2, _ = bx
+                                margin = 10
+                                region = frame[max(0, y1-margin):min(height, y2+margin),
+                                             max(0, x1-margin):min(width, x2+margin)]
+                                if region.size == 0:
+                                    continue
 
-                frame = body_det.draw_boxes(frame, last_body_boxes)
-                frame = face_rec.draw_faces(frame, last_face_results)
+                                # Use lock for face detection/recognition to prevent concurrent access
+                                with _detector_lock:
+                                    locs = face_rec.detect_faces(region)
+                                    adjusted = [(t+max(0, y1-margin), r+max(0, x1-margin),
+                                               b+max(0, y1-margin), l+max(0, x1-margin)) for t, r, b, l in locs]
+                                    if adjusted:
+                                        last_face_results.extend(face_rec.recognize_faces(frame, adjusted))
+
+                    frame = body_det.draw_boxes(frame, last_body_boxes)
+                    frame = face_rec.draw_faces(frame, last_face_results)
+                # For "live" cameras, skip all detection and drawing - just show raw video
 
                 # Only log to database every 2nd detection cycle to reduce database writes
-                if frame_skip % (detection_interval * 2) == 0:
+                # Skip logging for "live" cameras (no detection/attendance tracking)
+                if camera_role != "live" and frame_skip % (detection_interval * 2) == 0:
                     try:
                         # Get camera role for entry/exit tracking
                         entry_type = _cameras.get(camera_id).role if camera_id in _cameras else None
@@ -1574,16 +1558,18 @@ def generate_mjpeg_for_camera(camera_index: int, conf_threshold: float = 0.3):
         import traceback
         traceback.print_exc()
     finally:
-        print(f"🛑 Stopping video stream for {camera_id}")
+        # Decrement viewer count when stream ends
         with camera_lock:
-            _camera_viewers[camera_index] = max(0, _camera_viewers.get(camera_index, 1) - 1)
-            if _camera_viewers[camera_index] == 0:
-                try:
-                    _shared_caps[camera_index].release()
-                except:
-                    pass
-                _shared_caps.pop(camera_index, None)
-                _active_camera_streams[camera_index] = False
+            viewer_count = _active_camera_streams.get(camera_index, 1)
+            if isinstance(viewer_count, bool):
+                viewer_count = 1 if viewer_count else 0
+            new_count = max(0, viewer_count - 1)
+            _active_camera_streams[camera_index] = new_count
+            print(f"🛑 Viewer disconnected from camera {camera_index} (remaining viewers: {new_count})")
+            try:
+                cap.release()
+            except:
+                pass
 
 @app.get("/video_feed")
 async def video_feed():
@@ -1612,91 +1598,6 @@ async def video_feed_by_camera(camera_index: int):
             "X-Accel-Buffering": "no"
         }
     )
-
-@app.get("/snapshot")
-async def snapshot_default():
-    return await snapshot_by_camera(0)
-
-@app.get("/snapshot/{camera_index}")
-async def snapshot_by_camera(camera_index: int):
-    try:
-        camera_lock = _camera_locks[camera_index]
-        camera_id = f"CAM-{camera_index}"
-        cap, _ = _get_or_open_shared_cap(camera_index)
-        with camera_lock:
-            ret, frame = cap.read()
-        if not ret or frame is None or not hasattr(frame, 'size') or frame.size == 0:
-            raise Exception("No frame")
-        body_det, face_rec = _get_global_detectors()
-        env_conf = os.getenv("DETECT_CONF_THRESHOLD")
-        eff_conf = float(env_conf) if env_conf is not None else 0.3
-        height, width = frame.shape[:2]
-        last_body_boxes = []
-        last_face_results = []
-        with _detector_lock:
-            last_body_boxes = body_det.detect(frame, eff_conf)
-        if last_body_boxes:
-            for bx in last_body_boxes:
-                x1, y1, x2, y2, _ = bx
-                margin = 10
-                region = frame[max(0, y1-margin):min(height, y2+margin),
-                               max(0, x1-margin):min(width, x2+margin)]
-                if region.size == 0:
-                    continue
-                with _detector_lock:
-                    locs = face_rec.detect_faces(region)
-                    adjusted = [(t+max(0, y1-margin), r+max(0, x1-margin),
-                                b+max(0, y1-margin), l+max(0, x1-margin)) for t, r, b, l in locs]
-                    if adjusted:
-                        last_face_results.extend(face_rec.recognize_faces(frame, adjusted))
-        frame = body_det.draw_boxes(frame, last_body_boxes)
-        frame = face_rec.draw_faces(frame, last_face_results)
-        _update_camera_status(camera_id)
-        try:
-            entry_type = _cameras.get(camera_id).role if camera_id in _cameras else None
-            if entry_type == "none":
-                entry_type = None
-            if last_face_results:
-                for (_t, _r, _b, _l), name in last_face_results:
-                    emp_id = face_rec.known_face_ids.get(name, name) if name and name != "Unknown" else "Unknown"
-                    record = AttendanceRecord(
-                        employee_id=emp_id,
-                        name=name if name else "Unknown",
-                        timestamp=get_bangladesh_timestamp(),
-                        camera_id=camera_id,
-                        entry_type=entry_type
-                    )
-                    save_attendance_to_db(record)
-        except Exception:
-            pass
-        encode_params = [cv2.IMWRITE_JPEG_QUALITY, 75]
-        ok, jpeg = cv2.imencode('.jpg', frame, encode_params)
-        if not ok:
-            raise Exception("Encode failed")
-        return StreamingResponse(
-            io.BytesIO(jpeg.tobytes()),
-            media_type="image/jpeg",
-            headers={
-                "Cache-Control": "no-cache, no-store, must-revalidate",
-                "Pragma": "no-cache",
-                "Expires": "0"
-            }
-        )
-    except Exception:
-        import numpy as np
-        error_frame = np.zeros((480, 640, 3), dtype=np.uint8)
-        cv2.putText(error_frame, f"Camera {camera_index} Unavailable", (60, 240),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
-        ok, jpeg = cv2.imencode('.jpg', error_frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
-        return StreamingResponse(
-            io.BytesIO(jpeg.tobytes() if ok else b""),
-            media_type="image/jpeg",
-            headers={
-                "Cache-Control": "no-cache, no-store, must-revalidate",
-                "Pragma": "no-cache",
-                "Expires": "0"
-            }
-        )
 
 @app.get("/health")
 async def health():
@@ -1940,8 +1841,11 @@ async def list_cameras():
             try:
                 camera_index = int(camera_id.split("-")[1])
                 
-                # Priority 1: If camera is actively streaming, mark as online
-                if _active_camera_streams.get(camera_index, False):
+                # Priority 1: If camera is actively streaming (has viewers), mark as online
+                viewer_count = _active_camera_streams.get(camera_index, 0)
+                if isinstance(viewer_count, bool):
+                    viewer_count = 1 if viewer_count else 0
+                if viewer_count > 0:
                     if camera.status != "online":
                         camera.status = "online"
                         save_camera_to_db(camera)
@@ -1953,13 +1857,13 @@ async def list_cameras():
                         last_seen_str = _camera_last_seen[camera_id]
                         last_seen = datetime.fromisoformat(last_seen_str.replace('Z', '+00:00'))
                         time_diff = datetime.now() - last_seen.replace(tzinfo=None)
-                        
+
                         # If seen within last 5 minutes, mark as online
                         if time_diff <= timedelta(minutes=5):
                             if camera.status != "online":
                                 camera.status = "online"
                                 save_camera_to_db(camera)
-                            continue  # Skip hardware check if recently seen
+                            continue  # Skip further checks if recently seen
                         # If not seen for more than 10 minutes, mark as offline
                         elif time_diff > timedelta(minutes=10):
                             if camera.status != "offline":
@@ -1968,31 +1872,15 @@ async def list_cameras():
                             continue
                     except Exception:
                         pass
-                
-                # Priority 3: If status is offline or unknown, do a quick hardware check
-                # Only check if status is offline (to avoid unnecessary checks)
-                if camera.status == "offline":
-                    try:
-                        import platform
-                        # Quick check: try to open camera (non-blocking)
-                        cap = cv2.VideoCapture(camera_index, cv2.CAP_DSHOW if platform.system() == 'Windows' else None)
-                        if cap.isOpened():
-                            # Try to read one frame (with timeout)
-                            ret, _ = cap.read()
-                            cap.release()
-                            if ret:
-                                # Camera is available
-                                camera.status = "online"
-                                save_camera_to_db(camera)
-                                # Update last seen timestamp
-                                _camera_last_seen[camera_id] = get_bangladesh_timestamp()
-                        else:
-                            cap.release()
-                    except Exception:
-                        # If check fails, keep offline status
-                        pass
-                # If status is already online and not streaming/seen, keep it online
-                # (cameras might be available even if not actively streaming)
+
+                # NOTE: Hardware checks removed to prevent API timeouts.
+                # Camera status is now determined only by:
+                # 1. Active streaming status (_active_camera_streams)
+                # 2. Recent activity timestamps (_camera_last_seen)
+                # 3. Stored database status
+                #
+                # If you need to manually refresh camera availability,
+                # use the /cameras/discover endpoint instead.
                 
             except (ValueError, IndexError):
                 # Not a physical camera (CAM-{index}), keep current status

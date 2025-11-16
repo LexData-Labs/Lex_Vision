@@ -55,7 +55,7 @@ export interface Alert {
 export interface CameraConfig {
   id: string;
   name: string;
-  role: "entry" | "exit" | "none";
+  role: "entry" | "exit" | "live" | "none";
   status: "online" | "offline";
 }
 

@@ -2,7 +2,9 @@
   "permissions": {
     "allow": [
       "Bash(python -m venv:*)",
-      "Bash(npm install:*)"
+      "Bash(npm install:*)",
+      "Bash(tasklist:*)",
+      "Bash(findstr:*)"
     ],
     "deny": [],
     "ask": []
