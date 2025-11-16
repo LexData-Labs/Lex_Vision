@@ -785,8 +785,14 @@ _unknown_face_count: Dict[str, int] = {}  # Track unknown faces by time window
 _cameras: Dict[str, CameraConfig] = {}  # Camera configurations
 
 # Multi-camera support
-_active_camera_streams: Dict[int, bool] = {}  # Track which cameras are streaming
+_active_camera_streams: Dict[int, int] = {}  # Track viewer count per camera
 _camera_locks: Dict[int, threading.Lock] = defaultdict(threading.Lock)  # Thread locks per camera
+
+# Shared camera capture system (ONE capture per camera, multiple viewers)
+_shared_captures: Dict[int, any] = {}  # Shared VideoCapture instances
+_latest_frames: Dict[int, bytes] = {}  # Latest JPEG frame for each camera
+_capture_threads: Dict[int, threading.Thread] = {}  # Background capture threads
+_thread_stop_events: Dict[int, threading.Event] = {}  # Stop signals
 
 def _load_employees_from_data():
     """
@@ -1228,7 +1234,9 @@ def generate_mjpeg_for_camera(camera_index: int, conf_threshold: float = 0.3):
     last_body_boxes = []
     last_face_results = []
     failure_count = 0
-    max_failures_before_reopen = 20
+    # Increase failure threshold for multi-viewer stability (was 20)
+    # Higher value prevents frequent reopen attempts that fail on Windows DirectShow
+    max_failures_before_reopen = 100
     frames_yielded = 0
 
     print(f"🎥 Starting video stream for {camera_id} (detection interval: {detection_interval} frames)")
