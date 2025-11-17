@@ -5,7 +5,7 @@ import { useAuth } from "@/contexts/AuthContext";
 
 interface TopBarProps {
   userName: string;
-  userRole: "admin" | "employee";
+  userRole: "admin" | "employee" | "editor";
 }
 
 export function TopBar({ userName, userRole }: TopBarProps) {

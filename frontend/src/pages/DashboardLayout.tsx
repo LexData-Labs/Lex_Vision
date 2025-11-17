@@ -5,7 +5,7 @@ import { TopBar } from "@/components/layout/TopBar";
 
 interface DashboardLayoutProps {
   children: React.ReactNode;
-  userRole: "admin" | "employee";
+  userRole: "admin" | "employee" | "editor";
   userName: string;
 }
 

@@ -3,13 +3,20 @@ import { Sparkles } from "lucide-react";
 
 interface WelcomeCardProps {
   userName: string;
-  userRole: "admin" | "employee";
+  userRole: "admin" | "employee" | "editor";
 }
 
 export function WelcomeCard({ userName, userRole }: WelcomeCardProps) {
   const roleMessages = {
     admin: "Manage your AI-powered CCTV system with complete control and oversight.",
     employee: "View your attendance logs and manage your personal profile.",
+    editor: "Manage employees, attendance logs, and configure work schedules.",
+  };
+
+  const roleTitles = {
+    admin: "Administrator",
+    employee: "Employee",
+    editor: "Editor",
   };
 
   return (
@@ -21,7 +28,7 @@ export function WelcomeCard({ userName, userRole }: WelcomeCardProps) {
             <div className="flex items-center gap-2 mb-2">
               <Sparkles className="h-5 w-5" />
               <span className="text-sm opacity-90">
-                {userRole === "admin" ? "Administrator" : "Employee"} Dashboard
+                {roleTitles[userRole]} Dashboard
               </span>
             </div>
             <h1 className="text-2xl font-bold mb-2">

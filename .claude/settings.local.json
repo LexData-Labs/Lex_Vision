@@ -4,7 +4,10 @@
       "Bash(python -m venv:*)",
       "Bash(npm install:*)",
       "Bash(tasklist:*)",
-      "Bash(findstr:*)"
+      "Bash(findstr:*)",
+      "Bash(taskkill //F //PID 8868)",
+      "Bash(python backend.py:*)",
+      "Bash(timeout:*)"
     ],
     "deny": [],
     "ask": []

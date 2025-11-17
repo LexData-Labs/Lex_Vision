@@ -96,7 +96,8 @@ def init_database():
             name TEXT NOT NULL,
             password TEXT,
             password_reset_required INTEGER DEFAULT 1,
-            last_login TEXT
+            last_login TEXT,
+            role TEXT DEFAULT 'employee'
         )
     ''')
 
@@ -116,6 +117,10 @@ def init_database():
         if 'last_login' not in columns:
             print("🔄 Migrating database: Adding last_login column...")
             cursor.execute("ALTER TABLE employees ADD COLUMN last_login TEXT")
+
+        if 'role' not in columns:
+            print("🔄 Migrating database: Adding role column...")
+            cursor.execute("ALTER TABLE employees ADD COLUMN role TEXT DEFAULT 'employee'")
 
         conn.commit()
         print("✅ Database migration completed")
@@ -838,6 +843,7 @@ class Employee(BaseModel):
     has_password: bool = False
     password_reset_required: bool = False
     last_login: str | None = None
+    role: str = "employee"
 
 class PasswordGenerateRequest(BaseModel):
     employee_id: str
@@ -999,7 +1005,7 @@ async def login(credentials: LoginRequest):
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute(
-        'SELECT employee_id, name, password, password_reset_required FROM employees WHERE employee_id = ?',
+        'SELECT employee_id, name, password, password_reset_required, role FROM employees WHERE employee_id = ?',
         (credentials.username,)
     )
     row = cursor.fetchone()
@@ -1008,7 +1014,7 @@ async def login(credentials: LoginRequest):
     if not row:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
 
-    employee_id, name, hashed_password, password_reset_required = row['employee_id'], row['name'], row['password'], row['password_reset_required']
+    employee_id, name, hashed_password, password_reset_required, role = row['employee_id'], row['name'], row['password'], row['password_reset_required'], row['role']
 
     # Check if password is set
     if not hashed_password:
@@ -1028,12 +1034,12 @@ async def login(credentials: LoginRequest):
     conn.commit()
     conn.close()
 
-    # Create session
-    token = create_session(employee_id, "employee")
+    # Create session with actual role from database
+    token = create_session(employee_id, role or "employee")
 
     return LoginResponse(
         access_token=token,
-        role="employee",
+        role=role or "employee",
         employee_id=employee_id,
         name=name,
         password_reset_required=bool(password_reset_required)
@@ -1085,7 +1091,7 @@ async def list_employees():
     """Get all employees from database"""
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute('SELECT employee_id, name, password, password_reset_required, last_login FROM employees ORDER BY name')
+    cursor.execute('SELECT employee_id, name, password, password_reset_required, last_login, role FROM employees ORDER BY name')
     rows = cursor.fetchall()
     conn.close()
     return [
@@ -1094,7 +1100,8 @@ async def list_employees():
             name=row['name'],
             has_password=bool(row['password']),
             password_reset_required=bool(row['password_reset_required']) if row['password_reset_required'] is not None else False,
-            last_login=row['last_login']
+            last_login=row['last_login'],
+            role=row['role']
         ) for row in rows
     ]
 
@@ -1104,8 +1111,8 @@ async def create_employee(emp: Employee):
     conn = get_db_connection()
     cursor = conn.cursor()
     try:
-        cursor.execute('INSERT INTO employees (employee_id, name) VALUES (?, ?)',
-                      (emp.id, emp.name))
+        cursor.execute('INSERT INTO employees (employee_id, name, role) VALUES (?, ?, ?)',
+                      (emp.id, emp.name, emp.role))
         conn.commit()
         conn.close()
         _employees[emp.id] = emp  # Also update in-memory cache
@@ -1115,24 +1122,26 @@ async def create_employee(emp: Employee):
         raise HTTPException(status_code=400, detail="Employee already exists")
 
 @app.patch("/employees/{employee_id}")
-async def update_employee(employee_id: str, new_employee_id: str = None, name: str = None):
-    """Update employee ID and/or name - all previous logs will be updated"""
-    if not name and not new_employee_id:
-        raise HTTPException(status_code=400, detail="At least one of name or new_employee_id is required")
+async def update_employee(employee_id: str, new_employee_id: str = None, name: str = None, role: str = None):
+    """Update employee ID, name, and/or role - all previous logs will be updated"""
+    if not name and not new_employee_id and not role:
+        raise HTTPException(status_code=400, detail="At least one of name, new_employee_id, or role is required")
 
     conn = get_db_connection()
     cursor = conn.cursor()
 
     # Check if employee exists
-    cursor.execute('SELECT name FROM employees WHERE employee_id = ?', (employee_id,))
+    cursor.execute('SELECT name, role FROM employees WHERE employee_id = ?', (employee_id,))
     result = cursor.fetchone()
     if not result:
         conn.close()
         raise HTTPException(status_code=404, detail="Employee not found")
 
     current_name = result['name']
+    current_role = result.get('role', 'employee')
     updated_id = new_employee_id if new_employee_id else employee_id
     updated_name = name if name else current_name
+    updated_role = role if role else current_role
 
     # If employee ID is being changed
     if new_employee_id and new_employee_id != employee_id:
@@ -1150,9 +1159,9 @@ async def update_employee(employee_id: str, new_employee_id: str = None, name: s
                 cursor.execute('UPDATE attendance SET employee_id = ? WHERE employee_id = ?',
                              (new_employee_id, employee_id))
 
-                # Update the existing clean record with the new name
-                cursor.execute('UPDATE employees SET name = ? WHERE employee_id = ?',
-                             (updated_name, new_employee_id))
+                # Update the existing clean record with the new name and role
+                cursor.execute('UPDATE employees SET name = ?, role = ? WHERE employee_id = ?',
+                             (updated_name, updated_role, new_employee_id))
 
                 # Delete the corrupted record
                 cursor.execute('DELETE FROM employees WHERE employee_id = ?', (employee_id,))
@@ -1170,15 +1179,15 @@ async def update_employee(employee_id: str, new_employee_id: str = None, name: s
         else:
             # Normal case: new ID doesn't exist, proceed with ID change
             # Get current employee data
-            cursor.execute('SELECT password, password_reset_required, last_login FROM employees WHERE employee_id = ?', (employee_id,))
+            cursor.execute('SELECT password, password_reset_required, last_login, role FROM employees WHERE employee_id = ?', (employee_id,))
             emp_data = cursor.fetchone()
 
             # SQLite doesn't allow updating PRIMARY KEY, so we need to:
             # 1. Insert new record with new employee_id
             cursor.execute('''
-                INSERT INTO employees (employee_id, name, password, password_reset_required, last_login)
-                VALUES (?, ?, ?, ?, ?)
-            ''', (new_employee_id, updated_name, emp_data['password'], emp_data['password_reset_required'], emp_data['last_login']))
+                INSERT INTO employees (employee_id, name, password, password_reset_required, last_login, role)
+                VALUES (?, ?, ?, ?, ?, ?)
+            ''', (new_employee_id, updated_name, emp_data['password'], emp_data['password_reset_required'], emp_data['last_login'], updated_role))
 
             # 2. Update attendance records to point to new employee_id
             cursor.execute('UPDATE attendance SET employee_id = ? WHERE employee_id = ?', (new_employee_id, employee_id))
@@ -1213,20 +1222,20 @@ async def update_employee(employee_id: str, new_employee_id: str = None, name: s
 
             print(f"✅ Updated employee ID: {employee_id} -> {new_employee_id}, name: {updated_name}")
     else:
-        # Only updating name (no ID change)
-        cursor.execute('UPDATE employees SET name = ? WHERE employee_id = ?', (updated_name, employee_id))
+        # Only updating name and/or role (no ID change)
+        cursor.execute('UPDATE employees SET name = ?, role = ? WHERE employee_id = ?', (updated_name, updated_role, employee_id))
 
         # No need to rename face image file since it's just ID.jpeg (doesn't include name)
         # Update in-memory cache
         if employee_id in _employees:
             _employees[employee_id].name = updated_name
 
-        print(f"✅ Updated employee name: {employee_id} -> {updated_name}")
+        print(f"✅ Updated employee: {employee_id} -> name: {updated_name}, role: {updated_role}")
 
     conn.commit()
     conn.close()
 
-    return {"employee_id": updated_id, "name": updated_name, "message": "Employee updated successfully"}
+    return {"employee_id": updated_id, "name": updated_name, "role": updated_role, "message": "Employee updated successfully"}
 
 @app.delete("/employees/{employee_id}")
 async def delete_employee(employee_id: str):

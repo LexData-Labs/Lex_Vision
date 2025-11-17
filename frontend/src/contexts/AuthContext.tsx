@@ -4,7 +4,7 @@ import { api } from '@/services/api';
 
 export interface User {
   username: string;
-  role: 'administrator' | 'employee';
+  role: 'administrator' | 'employee' | 'editor';
   employee_id: string;
   name?: string;
   password_reset_required: boolean;
@@ -63,7 +63,7 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
   const login = async (username: string, password: string): Promise<boolean> => {
     try {
       const res = await api.login({ username, password });
-      const role = (res.role === 'administrator' || res.role === 'employee') ? res.role : 'employee';
+      const role = (res.role === 'administrator' || res.role === 'employee' || res.role === 'editor') ? res.role as 'administrator' | 'employee' | 'editor' : 'employee';
 
       const nextUser: User = {
         username: res.name,
@@ -85,7 +85,12 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
       sessionStorage.setItem('passwordResetRequired', String(nextUser.password_reset_required));
 
       // Navigate to appropriate dashboard
-      const dashboardPath = role === 'administrator' ? '/admin/dashboard' : '/employee/dashboard';
+      let dashboardPath = '/employee/dashboard';
+      if (role === 'administrator') {
+        dashboardPath = '/admin/dashboard';
+      } else if (role === 'editor') {
+        dashboardPath = '/editor/dashboard';
+      }
       navigate(dashboardPath);
       return true;
     } catch (error) {

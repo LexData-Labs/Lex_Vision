@@ -27,7 +27,7 @@ export interface LoginRequest {
 export interface LoginResponse {
   access_token: string;
   token_type: string;
-  role: "administrator" | "employee" | string;
+  role: "administrator" | "employee" | "editor" | string;
   employee_id: string;
   name: string;
   password_reset_required: boolean;
@@ -114,17 +114,18 @@ export const api = {
       method: "POST",
       body: JSON.stringify(rec),
     }),
-  employees: () => request<{ id: string; name: string; has_password: boolean; password_reset_required: boolean; last_login: string | null }[]>("/employees"),
-  createEmployee: (emp: { id: string; name: string }) =>
-    request<{ id: string; name: string }>("/employees", {
+  employees: () => request<{ id: string; name: string; has_password: boolean; password_reset_required: boolean; last_login: string | null; role: string }[]>("/employees"),
+  createEmployee: (emp: { id: string; name: string; role?: string }) =>
+    request<{ id: string; name: string; role: string }>("/employees", {
       method: "POST",
       body: JSON.stringify(emp),
     }),
-  updateEmployee: (employeeId: string, data: { newEmployeeId?: string; name?: string }) => {
+  updateEmployee: (employeeId: string, data: { newEmployeeId?: string; name?: string; role?: string }) => {
     const params = new URLSearchParams();
     if (data.newEmployeeId) params.append("new_employee_id", data.newEmployeeId);
     if (data.name) params.append("name", data.name);
-    return request<{ employee_id: string; name: string; message: string }>(`/employees/${employeeId}?${params.toString()}`, {
+    if (data.role) params.append("role", data.role);
+    return request<{ employee_id: string; name: string; role: string; message: string }>(`/employees/${employeeId}?${params.toString()}`, {
       method: "PATCH",
     });
   },

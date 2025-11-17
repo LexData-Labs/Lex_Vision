@@ -6,6 +6,7 @@ import {
   Users,
   Settings,
   User,
+  Clock,
 } from "lucide-react";
 import { NavLink, useLocation } from "react-router-dom";
 import {
@@ -22,7 +23,7 @@ import {
 } from "@/components/ui/sidebar";
 
 interface AppSidebarProps {
-  userRole: "admin" | "employee";
+  userRole: "admin" | "employee" | "editor";
 }
 
 const adminItems = [
@@ -40,12 +41,20 @@ const employeeItems = [
   { title: "Profile", url: "/employee/profile", icon: User },
 ];
 
+const editorItems = [
+  { title: "Dashboard", url: "/editor/dashboard", icon: LayoutDashboard },
+  { title: "Employees", url: "/editor/employees", icon: Users },
+  { title: "Attendance Logs", url: "/editor/logs", icon: FileText },
+  { title: "Live Cameras", url: "/editor/cameras", icon: Camera },
+  { title: "Work Schedule", url: "/editor/schedule", icon: Clock },
+];
+
 export function AppSidebar({ userRole }: AppSidebarProps) {
   const { state } = useSidebar();
   const location = useLocation();
   const currentPath = location.pathname;
-  
-  const items = userRole === "admin" ? adminItems : employeeItems;
+
+  const items = userRole === "admin" ? adminItems : userRole === "editor" ? editorItems : employeeItems;
   const collapsed = state === "collapsed";
   
   const isActive = (path: string) => currentPath === path;

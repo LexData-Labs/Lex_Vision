@@ -13,7 +13,7 @@ interface User {
   id: string;
   username: string;
   email: string;
-  role: "administrator" | "employee" | "viewer";
+  role: "administrator" | "employee" | "editor" | "viewer";
   status: "active" | "inactive" | "suspended";
   lastLogin?: string;
   createdAt: string;
@@ -42,7 +42,7 @@ export default function Users() {
     employeeId: "",
     name: "",
     email: "",
-    role: "employee" as "administrator" | "employee" | "viewer",
+    role: "employee" as "administrator" | "employee" | "editor" | "viewer",
     department: "",
   });
   // Add Employee form (backend requires id and name)
@@ -53,13 +53,16 @@ export default function Users() {
   useEffect(() => {
     const loadEmployees = async () => {
       try {
+        console.log('Loading employees from backend...');
         const employees = await api.employees();
+        console.log('Employees loaded:', employees);
+
         // Map minimal backend employee -> UI User with sensible defaults
         const mapped: User[] = employees.map((e) => ({
           id: e.id.trim(),
           username: (e.name || e.id).trim(),
           email: "",
-          role: "employee",
+          role: (e.role as "administrator" | "employee" | "editor" | "viewer") || "employee",
           status: "active",
           createdAt: new Date().toISOString(),
           permissions: [],
@@ -69,9 +72,11 @@ export default function Users() {
           password_reset_required: e.password_reset_required,
           lastLogin: e.last_login || undefined,
         }));
+        console.log('Mapped users:', mapped);
         setUsers(mapped);
         setFilteredUsers(mapped);
-      } catch {
+      } catch (error) {
+        console.error('Failed to load employees:', error);
         // On failure, show empty list (no mock data)
         setUsers([]);
         setFilteredUsers([]);
@@ -88,7 +93,7 @@ export default function Users() {
         id: e.id.trim(),
         username: (e.name || e.id).trim(),
         email: "",
-        role: "employee",
+        role: (e.role as "administrator" | "employee" | "editor" | "viewer") || "employee",
         status: "active",
         createdAt: new Date().toISOString(),
         permissions: [],
@@ -136,6 +141,8 @@ export default function Users() {
         return <Shield className="h-4 w-4" />;
       case "employee":
         return <User className="h-4 w-4" />;
+      case "editor":
+        return <Settings className="h-4 w-4" />;
       case "viewer":
         return <Camera className="h-4 w-4" />;
       default:
@@ -149,6 +156,8 @@ export default function Users() {
         return "bg-purple-100 text-purple-800";
       case "employee":
         return "bg-blue-100 text-blue-800";
+      case "editor":
+        return "bg-orange-100 text-orange-800";
       case "viewer":
         return "bg-green-100 text-green-800";
       default:
@@ -210,7 +219,7 @@ export default function Users() {
         id: e.id.trim(),
         username: (e.name || e.id).trim(),
         email: "",
-        role: "employee",
+        role: (e.role as "administrator" | "employee" | "editor" | "viewer") || "employee",
         status: "active",
         createdAt: new Date().toISOString(),
         permissions: [],
@@ -241,11 +250,12 @@ export default function Users() {
     const trimmedName = formData.name.trim();
 
     try {
-      // Check if employee ID or name changed
+      // Check if employee ID, name, or role changed
       const idChanged = trimmedId !== editingUser.id;
       const nameChanged = trimmedName !== editingUser.username;
+      const roleChanged = formData.role !== editingUser.role;
 
-      if (!idChanged && !nameChanged) {
+      if (!idChanged && !nameChanged && !roleChanged) {
         alert("No changes detected");
         setIsEditUserOpen(false);
         return;
@@ -255,6 +265,7 @@ export default function Users() {
       const result = await api.updateEmployee(editingUser.id, {
         newEmployeeId: idChanged ? trimmedId : undefined,
         name: trimmedName,
+        role: formData.role,
       });
 
       // Reload employees from backend to get updated data
@@ -263,7 +274,7 @@ export default function Users() {
         id: e.id.trim(),
         username: (e.name || e.id).trim(),
         email: "",
-        role: "employee",
+        role: (e.role as "administrator" | "employee" | "editor" | "viewer") || "employee",
         status: "active",
         createdAt: new Date().toISOString(),
         permissions: [],
@@ -483,6 +494,7 @@ export default function Users() {
                 <SelectItem value="all">All Roles</SelectItem>
                 <SelectItem value="administrator">Administrator</SelectItem>
                 <SelectItem value="employee">Employee</SelectItem>
+                <SelectItem value="editor">Editor</SelectItem>
                 <SelectItem value="viewer">Viewer</SelectItem>
               </SelectContent>
             </Select>
@@ -686,6 +698,7 @@ export default function Users() {
                 <SelectContent>
                   <SelectItem value="administrator">Administrator</SelectItem>
                   <SelectItem value="employee">Employee</SelectItem>
+                  <SelectItem value="editor">Editor</SelectItem>
                   <SelectItem value="viewer">Viewer</SelectItem>
                 </SelectContent>
               </Select>

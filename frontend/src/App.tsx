@@ -10,6 +10,11 @@ import { DashboardLayout } from "./pages/DashboardLayout";
 import AdminDashboard from "./pages/AdminDashboard";
 import AdminSettings from "./pages/AdminSettings";
 import EmployeeDashboard from "./pages/EmployeeDashboard";
+import EditorDashboard from "./pages/EditorDashboard";
+import EditorEmployees from "./pages/EditorEmployees";
+import EditorLogs from "./pages/EditorLogs";
+import EditorCameras from "./pages/EditorCameras";
+import WorkSchedule from "./pages/WorkSchedule";
 import FaceRecognition from "./pages/FaceRecognition";
 import Logs from "./pages/Logs";
 import Alerts from "./pages/Alerts";
@@ -26,21 +31,21 @@ tf.ready().then(() => {
 
 const queryClient = new QueryClient();
 
-const ProtectedRoute = ({ children, requiredRole }: { children: React.ReactNode; requiredRole?: 'administrator' | 'employee' }) => {
+const ProtectedRoute = ({ children, requiredRole }: { children: React.ReactNode; requiredRole?: 'administrator' | 'employee' | 'editor' }) => {
   const { user, isAuthenticated, isLoading } = useAuth();
-  
+
   if (isLoading) {
     return <div>Loading...</div>;
   }
-  
+
   if (!isAuthenticated) {
     return <Navigate to="/login" replace />;
   }
-  
+
   if (requiredRole && user?.role !== requiredRole) {
     return <Navigate to="/login" replace />;
   }
-  
+
   return <>{children}</>;
 };
 
@@ -83,7 +88,23 @@ const AppRoutes = () => {
           </DashboardLayout>
         </ProtectedRoute>
       } />
-      
+
+      {/* Editor Dashboard Routes */}
+      <Route path="/editor/*" element={
+        <ProtectedRoute requiredRole="editor">
+          <DashboardLayout userRole="editor" userName={user?.username || "Editor"}>
+            <Routes>
+              <Route path="dashboard" element={<EditorDashboard />} />
+              <Route path="employees" element={<EditorEmployees />} />
+              <Route path="logs" element={<EditorLogs />} />
+              <Route path="cameras" element={<EditorCameras />} />
+              <Route path="schedule" element={<WorkSchedule />} />
+              <Route path="*" element={<EditorDashboard />} />
+            </Routes>
+          </DashboardLayout>
+        </ProtectedRoute>
+      } />
+
       {/* ADD ALL CUSTOM ROUTES ABOVE THE CATCH-ALL "*" ROUTE */}
       <Route path="*" element={<NotFound />} />
     </Routes>

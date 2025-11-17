@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
+import { useNavigate } from "react-router-dom";
 import { Calendar, Clock, FileText, Download, CheckCircle, XCircle, Key, AlertCircle } from "lucide-react";
 import { WelcomeCard } from "@/components/ui/welcome-card";
 import { StatCard } from "@/components/ui/stat-card";
@@ -8,26 +9,127 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { useAuth } from "@/contexts/AuthContext";
-import { api } from "@/services/api";
+import { api, AttendanceRecord } from "@/services/api";
 
 export default function EmployeeDashboard() {
   const { user, updatePasswordResetStatus } = useAuth();
+  const navigate = useNavigate();
   const [currentPassword, setCurrentPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [passwordError, setPasswordError] = useState("");
   const [passwordSuccess, setPasswordSuccess] = useState(false);
   const [isChangingPassword, setIsChangingPassword] = useState(false);
+  const [attendanceData, setAttendanceData] = useState<AttendanceRecord[]>([]);
+  const [loading, setLoading] = useState(true);
 
-  // Mock data - in real app, this would come from API
   const employeeName = user?.username || "Employee";
-  const stats = {
-    daysPresent: 22,
-    totalHours: 176,
-    firstEntry: "08:30 AM",
-    lastExit: "05:45 PM",
-    missedDays: 2,
+
+  // Fetch attendance data
+  useEffect(() => {
+    const fetchAttendance = async () => {
+      try {
+        const data = await api.attendance();
+        // Filter to show only current employee's records
+        const myRecords = data.filter((record: AttendanceRecord) => record.employee_id === user?.employee_id);
+        setAttendanceData(myRecords);
+      } catch (error) {
+        console.error('Failed to fetch attendance:', error);
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    if (user?.employee_id) {
+      fetchAttendance();
+      // Refresh every 30 seconds
+      const interval = setInterval(fetchAttendance, 30000);
+      return () => clearInterval(interval);
+    }
+  }, [user?.employee_id]);
+
+  // Calculate statistics from real data
+  const calculateStats = () => {
+    const now = new Date();
+    const currentMonth = now.getMonth();
+    const currentYear = now.getFullYear();
+    const today = now.toDateString();
+
+    // Filter records for current month
+    const monthRecords = attendanceData.filter((record) => {
+      const recordDate = new Date(record.timestamp);
+      return recordDate.getMonth() === currentMonth && recordDate.getFullYear() === currentYear;
+    });
+
+    // Filter records for today
+    const todayRecords = attendanceData.filter((record) => {
+      const recordDate = new Date(record.timestamp);
+      return recordDate.toDateString() === today;
+    });
+
+    // Count unique days present this month
+    const uniqueDays = new Set(
+      monthRecords.map((record) => new Date(record.timestamp).toDateString())
+    );
+    const daysPresent = uniqueDays.size;
+
+    // Get today's entry and exit
+    const entryRecords = todayRecords.filter((r) => r.entry_type === "entry");
+    const exitRecords = todayRecords.filter((r) => r.entry_type === "exit");
+
+    const firstEntry = entryRecords.length > 0
+      ? new Date(entryRecords[0].timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+      : "N/A";
+
+    const lastExit = exitRecords.length > 0
+      ? new Date(exitRecords[exitRecords.length - 1].timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+      : "N/A";
+
+    // Calculate total hours (rough estimate based on entry/exit pairs)
+    let totalMinutes = 0;
+    const dayMap = new Map<string, { entry?: Date; exit?: Date }>();
+
+    monthRecords.forEach((record) => {
+      const day = new Date(record.timestamp).toDateString();
+      if (!dayMap.has(day)) {
+        dayMap.set(day, {});
+      }
+      const dayData = dayMap.get(day)!;
+      if (record.entry_type === "entry" && !dayData.entry) {
+        dayData.entry = new Date(record.timestamp);
+      } else if (record.entry_type === "exit") {
+        dayData.exit = new Date(record.timestamp);
+      }
+    });
+
+    dayMap.forEach((dayData) => {
+      if (dayData.entry && dayData.exit) {
+        const diff = dayData.exit.getTime() - dayData.entry.getTime();
+        totalMinutes += diff / (1000 * 60);
+      }
+    });
+
+    const totalHours = Math.round(totalMinutes / 60);
+    const avgHoursPerDay = daysPresent > 0 ? (totalMinutes / 60 / daysPresent).toFixed(1) : "0.0";
+
+    return {
+      daysPresent,
+      totalHours,
+      firstEntry,
+      lastExit,
+      avgHoursPerDay,
+      todayRecords,
+    };
   };
+
+  const stats = loading ? {
+    daysPresent: 0,
+    totalHours: 0,
+    firstEntry: "Loading...",
+    lastExit: "Loading...",
+    avgHoursPerDay: "0.0",
+    todayRecords: [],
+  } : calculateStats();
 
   const handlePasswordChange = async () => {
     setPasswordError("");
@@ -85,6 +187,37 @@ export default function EmployeeDashboard() {
     }
   };
 
+  const handleDownloadReport = () => {
+    const now = new Date();
+    const currentMonth = now.getMonth();
+    const currentYear = now.getFullYear();
+
+    // Filter records for current month
+    const monthRecords = attendanceData.filter((record) => {
+      const recordDate = new Date(record.timestamp);
+      return recordDate.getMonth() === currentMonth && recordDate.getFullYear() === currentYear;
+    });
+
+    // Create CSV
+    const csv = [
+      ["Date", "Time", "Type", "Camera"],
+      ...monthRecords.map(record => [
+        new Date(record.timestamp).toLocaleDateString(),
+        new Date(record.timestamp).toLocaleTimeString(),
+        record.entry_type || "Unknown",
+        record.camera_id || "N/A"
+      ])
+    ].map(row => row.join(",")).join("\n");
+
+    const blob = new Blob([csv], { type: "text/csv" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `attendance-report-${currentYear}-${(currentMonth + 1).toString().padStart(2, '0')}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
   return (
     <div className="p-6 space-y-6 bg-gradient-subtle min-h-screen">
       {/* Password Reset Required Alert */}
@@ -108,125 +241,123 @@ export default function EmployeeDashboard() {
             title="Days Present This Month"
             value={stats.daysPresent}
             icon={Calendar}
-            description="Out of 24 working days"
-            trend={{ value: 5, isPositive: true }}
-          />
-          
-          <StatCard
-            title="Late Entries"
-            value={3}
-            icon={Clock}
             description="This month"
-            trend={{ value: -25, isPositive: false }}
           />
-          
+
+          <StatCard
+            title="Total Hours This Month"
+            value={stats.totalHours}
+            icon={Clock}
+            description="Hours worked"
+          />
+
           <StatCard
             title="First Entry Today"
             value={stats.firstEntry}
             icon={CheckCircle}
-            description="Main entrance"
+            description={stats.firstEntry !== "N/A" ? "Entry time" : "No entry yet"}
           />
-          
+
           <StatCard
             title="Last Exit Today"
             value={stats.lastExit}
             icon={XCircle}
-            description="Parking lot"
-          />
-          
-          <StatCard
-            title="Missed Days"
-            value={stats.missedDays}
-            icon={Calendar}
-            description="This month"
-            trend={{ value: -50, isPositive: false }}
+            description={stats.lastExit !== "N/A" ? "Exit time" : "No exit yet"}
           />
 
           <StatCard
             title="Average Hours/Day"
-            value="8.2"
+            value={stats.avgHoursPerDay}
             icon={Clock}
             description="This month"
-            trend={{ value: 3, isPositive: true }}
+          />
+
+          <StatCard
+            title="Total Records"
+            value={attendanceData.length}
+            icon={FileText}
+            description="All time"
           />
         </div>
 
         {/* Personal Actions */}
         <div className="lg:col-span-4 space-y-4">
-          {/* Change Password Card */}
-          <Card className="bg-gradient-card border-0 shadow-elegant">
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2">
-                <Key className="h-5 w-5 text-primary" />
-                Change Password
-              </CardTitle>
-              <CardDescription>
-                Update your account password
-              </CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              {passwordSuccess && (
-                <Alert className="bg-green-50 border-green-200">
-                  <CheckCircle className="h-4 w-4 text-green-600" />
-                  <AlertDescription className="text-green-800">
-                    Password changed successfully!
-                  </AlertDescription>
-                </Alert>
-              )}
+          {/* Change Password Card - Only show when password reset is required */}
+          {user?.password_reset_required && (
+            <Card className="bg-gradient-card border-0 shadow-elegant">
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2">
+                  <Key className="h-5 w-5 text-primary" />
+                  Change Password
+                </CardTitle>
+                <CardDescription>
+                  Update your account password
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                {passwordSuccess && (
+                  <Alert className="bg-green-50 border-green-200">
+                    <CheckCircle className="h-4 w-4 text-green-600" />
+                    <AlertDescription className="text-green-800">
+                      Password changed successfully!
+                    </AlertDescription>
+                  </Alert>
+                )}
 
-              {passwordError && (
-                <Alert className="bg-red-50 border-red-200">
-                  <AlertCircle className="h-4 w-4 text-red-600" />
-                  <AlertDescription className="text-red-800">
-                    {passwordError}
-                  </AlertDescription>
-                </Alert>
-              )}
+                {passwordError && (
+                  <Alert className="bg-red-50 border-red-200">
+                    <AlertCircle className="h-4 w-4 text-red-600" />
+                    <AlertDescription className="text-red-800">
+                      {passwordError}
+                    </AlertDescription>
+                  </Alert>
+                )}
 
-              <div className="space-y-3">
-                <div>
-                  <Label htmlFor="current-password">Current Password</Label>
-                  <Input
-                    id="current-password"
-                    type="password"
-                    value={currentPassword}
-                    onChange={(e) => setCurrentPassword(e.target.value)}
-                    placeholder="Enter current password"
-                  />
+                <div className="space-y-3">
+                  <div>
+                    <Label htmlFor="current-password">Current Password</Label>
+                    <Input
+                      id="current-password"
+                      type="password"
+                      value={currentPassword}
+                      onChange={(e) => setCurrentPassword(e.target.value)}
+                      placeholder="Enter current password"
+                    />
+                  </div>
+
+                  <div>
+                    <Label htmlFor="new-password">New Password</Label>
+                    <Input
+                      id="new-password"
+                      type="password"
+                      value={newPassword}
+                      onChange={(e) => setNewPassword(e.target.value)}
+                      placeholder="Enter new password"
+                    />
+                  </div>
+
+                  <div>
+                    <Label htmlFor="confirm-password">Confirm New Password</Label>
+                    <Input
+                      id="confirm-password"
+                      type="password"
+                      value={confirmPassword}
+                      onChange={(e) => setConfirmPassword(e.target.value)}
+                      placeholder="Confirm new password"
+                    />
+                  </div>
+
+                  <Button
+                    className="w-full"
+                    onClick={handlePasswordChange}
+                    disabled={isChangingPassword}
+                  >
+                    {isChangingPassword ? "Changing..." : "Change Password"}
+                  </Button>
                 </div>
-
-                <div>
-                  <Label htmlFor="new-password">New Password</Label>
-                  <Input
-                    id="new-password"
-                    type="password"
-                    value={newPassword}
-                    onChange={(e) => setNewPassword(e.target.value)}
-                    placeholder="Enter new password"
-                  />
-                </div>
-
-                <div>
-                  <Label htmlFor="confirm-password">Confirm New Password</Label>
-                  <Input
-                    id="confirm-password"
-                    type="password"
-                    value={confirmPassword}
-                    onChange={(e) => setConfirmPassword(e.target.value)}
-                    placeholder="Confirm new password"
-                  />
-                </div>
-
-                <Button
-                  className="w-full"
-                  onClick={handlePasswordChange}
-                  disabled={isChangingPassword}
-                >
-                  {isChangingPassword ? "Changing..." : "Change Password"}
-                </Button>
-              </div>
-            </CardContent>
-          </Card>
+              </CardContent>
+            </Card>
+          )}
 
           <Card className="bg-gradient-card border-0 shadow-elegant">
             <CardHeader>
@@ -234,19 +365,27 @@ export default function EmployeeDashboard() {
                 <FileText className="h-5 w-5 text-primary" />
                 Quick Actions
               </CardTitle>
+              <CardDescription>
+                Manage your attendance records
+              </CardDescription>
             </CardHeader>
             <CardContent className="space-y-3">
-              <Button className="w-full justify-start" variant="outline">
+              <Button
+                className="w-full justify-start"
+                variant="outline"
+                onClick={handleDownloadReport}
+                disabled={attendanceData.length === 0}
+              >
                 <Download className="h-4 w-4 mr-2" />
                 Download Monthly Report
               </Button>
-              <Button className="w-full justify-start" variant="outline">
+              <Button
+                className="w-full justify-start"
+                variant="outline"
+                onClick={() => navigate('/employee/my-logs')}
+              >
                 <FileText className="h-4 w-4 mr-2" />
                 View Detailed Logs
-              </Button>
-              <Button className="w-full justify-start" variant="outline">
-                <Calendar className="h-4 w-4 mr-2" />
-                Request Leave
               </Button>
             </CardContent>
           </Card>
@@ -257,33 +396,47 @@ export default function EmployeeDashboard() {
                 <Clock className="h-5 w-5 text-primary" />
                 Today's Timeline
               </CardTitle>
+              <CardDescription>
+                {stats.todayRecords && stats.todayRecords.length > 0
+                  ? `${stats.todayRecords.length} record${stats.todayRecords.length > 1 ? 's' : ''} today`
+                  : "Your attendance records for today"}
+              </CardDescription>
             </CardHeader>
-            <CardContent className="space-y-3">
-              <div className="space-y-3">
-                <div className="flex items-center justify-between p-3 bg-green-50 border border-green-200 rounded-lg">
-                  <div className="flex items-center gap-2">
-                    <CheckCircle className="h-4 w-4 text-green-600" />
-                    <span className="text-sm font-medium">Entry</span>
-                  </div>
-                  <span className="text-sm text-green-700">08:30 AM</span>
+            <CardContent>
+              {stats.todayRecords && stats.todayRecords.length > 0 ? (
+                <div className="max-h-[400px] overflow-y-auto pr-2 space-y-3">
+                  {stats.todayRecords
+                    .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
+                    .map((record: AttendanceRecord, index: number) => {
+                      const isEntry = record.entry_type === "entry";
+                      const bgColor = isEntry ? "bg-green-50 border-green-200" : "bg-orange-50 border-orange-200";
+                      const textColor = isEntry ? "text-green-700" : "text-orange-700";
+                      const iconColor = isEntry ? "text-green-600" : "text-orange-600";
+                      const Icon = isEntry ? CheckCircle : XCircle;
+                      const label = isEntry ? "Entry" : "Exit";
+
+                      return (
+                        <div key={index} className={`flex items-center justify-between p-3 ${bgColor} border rounded-lg`}>
+                          <div className="flex items-center gap-2">
+                            <Icon className={`h-4 w-4 ${iconColor}`} />
+                            <span className="text-sm font-medium">{label}</span>
+                            {record.camera_id && (
+                              <span className="text-xs text-muted-foreground">({record.camera_id})</span>
+                            )}
+                          </div>
+                          <span className={`text-sm ${textColor}`}>
+                            {new Date(record.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                          </span>
+                        </div>
+                      );
+                    })}
                 </div>
-                
-                <div className="flex items-center justify-between p-3 bg-blue-50 border border-blue-200 rounded-lg">
-                  <div className="flex items-center gap-2">
-                    <Clock className="h-4 w-4 text-blue-600" />
-                    <span className="text-sm font-medium">Break</span>
-                  </div>
-                  <span className="text-sm text-blue-700">12:30 PM</span>
+              ) : (
+                <div className="text-center py-8 text-muted-foreground">
+                  <Clock className="h-8 w-8 mx-auto mb-2 opacity-50" />
+                  <p>No attendance records for today</p>
                 </div>
-                
-                <div className="flex items-center justify-between p-3 bg-orange-50 border border-orange-200 rounded-lg">
-                  <div className="flex items-center gap-2">
-                    <XCircle className="h-4 w-4 text-orange-600" />
-                    <span className="text-sm font-medium">Exit</span>
-                  </div>
-                  <span className="text-sm text-orange-700">05:45 PM</span>
-                </div>
-              </div>
+              )}
             </CardContent>
           </Card>
         </div>
