@@ -14,6 +14,8 @@ import FaceRecognition from "./pages/FaceRecognition";
 import Logs from "./pages/Logs";
 import Alerts from "./pages/Alerts";
 import Users from "./pages/Users";
+import MyLogs from "./pages/MyLogs";
+import Profile from "./pages/Profile";
 import { AuthProvider, useAuth } from "./contexts/AuthContext";
 import * as tf from '@tensorflow/tfjs';
 
@@ -74,6 +76,8 @@ const AppRoutes = () => {
           <DashboardLayout userRole="employee" userName={user?.username || "Employee"}>
             <Routes>
               <Route path="dashboard" element={<EmployeeDashboard />} />
+              <Route path="my-logs" element={<MyLogs />} />
+              <Route path="profile" element={<Profile />} />
               <Route path="*" element={<EmployeeDashboard />} />
             </Routes>
           </DashboardLayout>

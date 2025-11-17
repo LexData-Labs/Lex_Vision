@@ -570,88 +570,125 @@ class FaceRecognizer:
     
     def __init__(self, employee_faces_dir):
         self.known_face_encodings = []
-        self.known_face_names = []
-        self.known_face_ids = {}
+        self.known_face_names = []  # Now stores employee IDs directly
         self.employee_faces_dir = employee_faces_dir
-        
+        self.cache_file = os.path.join(employee_faces_dir, '.face_encodings_cache.pkl')
+
         self.load_employee_faces()
-        self.load_employee_ids()
-    
-    def load_employee_ids(self):
-        """Load employee IDs from the employees directory"""
-        employees_dir = os.path.join(os.path.dirname(self.employee_faces_dir), 'employees')
-        print(f"Loading employee IDs from {employees_dir}")
-        
-        if not os.path.exists(employees_dir):
-            print(f"Warning: Employees directory {employees_dir} does not exist")
-            return
-        
-        for filename in os.listdir(employees_dir):
-            if filename.endswith('.txt'):
-                file_path = os.path.join(employees_dir, filename)
-                try:
-                    with open(file_path, 'r') as f:
-                        lines = f.readlines()
-                        employee_id = None
-                        employee_name = None
-                        
-                        for line in lines:
-                            line = line.strip()
-                            if line.startswith('ID:'):
-                                employee_id = line.split('ID:')[1].strip()
-                            elif line.startswith('Name:'):
-                                employee_name = line.split('Name:')[1].strip()
-                        
-                        if employee_id and employee_name:
-                            self.known_face_ids[employee_name] = employee_id
-                            print(f"Loaded ID for {employee_name}: {employee_id}")
-                except Exception as e:
-                    print(f"Error loading employee ID from {filename}: {e}")
+
+    def _get_cache_metadata(self):
+        """Get metadata about face image files for cache validation"""
+        metadata = {}
+        if not os.path.exists(self.employee_faces_dir):
+            return metadata
+
+        for file in os.listdir(self.employee_faces_dir):
+            if file.lower().endswith(('.png', '.jpg', '.jpeg')):
+                file_path = os.path.join(self.employee_faces_dir, file)
+                metadata[file] = os.path.getmtime(file_path)
+        return metadata
+
+    def _load_from_cache(self):
+        """Load face encodings from cache if valid"""
+        if not os.path.exists(self.cache_file):
+            return False
+
+        try:
+            import pickle
+            with open(self.cache_file, 'rb') as f:
+                cache_data = pickle.load(f)
+
+            # Validate cache metadata
+            current_metadata = self._get_cache_metadata()
+            cached_metadata = cache_data.get('metadata', {})
+
+            if current_metadata != cached_metadata:
+                print("⚠️  Face images changed, cache invalid")
+                return False
+
+            # Load cached data
+            self.known_face_encodings = cache_data['encodings']
+            self.known_face_names = cache_data['names']
+
+            print(f"✅ Loaded {len(self.known_face_names)} face encodings from cache (instant)")
+            return True
+
+        except Exception as e:
+            print(f"⚠️  Failed to load cache: {e}")
+            return False
+
+    def _save_to_cache(self):
+        """Save face encodings to cache"""
+        try:
+            import pickle
+            cache_data = {
+                'encodings': self.known_face_encodings,
+                'names': self.known_face_names,
+                'metadata': self._get_cache_metadata()
+            }
+
+            with open(self.cache_file, 'wb') as f:
+                pickle.dump(cache_data, f)
+
+            print(f"✅ Saved {len(self.known_face_names)} face encodings to cache")
+
+        except Exception as e:
+            print(f"⚠️  Failed to save cache: {e}")
 
     def load_employee_faces(self):
-        """Load employee faces from the employee_faces directory"""
+        """Load employee faces from the employee_faces directory (with caching)"""
         print(f"Loading employee faces from {self.employee_faces_dir}")
-        
+
         if not os.path.exists(self.employee_faces_dir):
             print(f"Warning: Employee faces directory {self.employee_faces_dir} does not exist")
+            return
+
+        # Try to load from cache first
+        if self._load_from_cache():
             return
         
         employee_files = {}
         for file in os.listdir(self.employee_faces_dir):
             if not file.lower().endswith(('.png', '.jpg', '.jpeg')):
                 continue
-                
-            base_name = file.split('.')[0]
-            if '-' in base_name:
-                base_name = base_name.split('-', 1)[1]
-            base_name = base_name.replace('_', ' ').strip()
-            
-            if base_name not in employee_files:
-                employee_files[base_name] = []
-            employee_files[base_name].append(file)
 
-        for employee_name, files in employee_files.items():
+            # Extract employee ID from filename
+            # Expected format: "800001.jpeg" (just the numeric ID)
+            base_name = file.split('.')[0]
+
+            # Only accept numeric IDs
+            if base_name.isdigit():
+                employee_id = base_name
+            else:
+                print(f"⚠️  Skipping invalid face file (must be numeric ID): {file}")
+                continue
+
+            if employee_id not in employee_files:
+                employee_files[employee_id] = []
+            employee_files[employee_id].append(file)
+
+        for employee_id, files in employee_files.items():
             face_found = False
-            
+
             for file in files:
                 if face_found:
                     break
-                    
+
                 img_path = os.path.join(self.employee_faces_dir, file)
                 try:
                     image_cv = cv2.imread(img_path)
                     if image_cv is None:
                         continue
-                    
+
                     image_rgb = cv2.cvtColor(image_cv, cv2.COLOR_BGR2RGB)
                     face_locations = face_recognition.face_locations(image_rgb)
-                    
+
                     if face_locations:
                         face_encodings = face_recognition.face_encodings(image_rgb, face_locations)
                         if len(face_encodings) > 0:
                             self.known_face_encodings.append(face_encodings[0])
-                            self.known_face_names.append(employee_name)
-                            print(f"Loaded face for employee: {employee_name} from {file}")
+                            self.known_face_names.append(employee_id)
+                            print(f"Loaded face for employee ID: {employee_id} from {file}")
                             face_found = True
                             continue
                     
@@ -669,8 +706,8 @@ class FaceRecognizer:
                                 face_encodings = face_recognition.face_encodings(face_img, face_locations)
                                 if len(face_encodings) > 0:
                                     self.known_face_encodings.append(face_encodings[0])
-                                    self.known_face_names.append(employee_name)
-                                    print(f"Loaded face for employee: {employee_name} from {file} (cascade)")
+                                    self.known_face_names.append(employee_id)
+                                    print(f"Loaded face for employee ID: {employee_id} from {file} (cascade)")
                                     face_found = True
                                     continue
                         except Exception:
@@ -678,12 +715,15 @@ class FaceRecognizer:
                             
                 except Exception as e:
                     print(f"Error processing {file}: {e}")
-            
+
             if not face_found:
-                print(f"Warning: No face found for employee {employee_name} in any image")
-        
+                print(f"Warning: No face found for employee ID {employee_id} in any image")
+
         print(f"Loaded {len(self.known_face_names)} employee faces")
-    
+
+        # Save to cache for faster loading next time
+        self._save_to_cache()
+
     def detect_faces(self, frame):
         """Detect faces in the given frame"""
         rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -721,24 +761,37 @@ class FaceRecognizer:
         """Draw face boxes and names on the frame"""
         result_frame = frame.copy()
         deep_green = (0, 128, 0)
-        
-        for (top, right, bottom, left), name in recognition_results:
+
+        for (top, right, bottom, left), employee_id in recognition_results:
             cv2.rectangle(result_frame, (left, top), (right, bottom), deep_green, 1)
-            
-            employee_id = self.known_face_ids.get(name, "")
-            
-            cv2.putText(result_frame, name, (left + 6, bottom - 35), 
-                        cv2.FONT_HERSHEY_DUPLEX, 0.8, (0, 0, 255), 2)
-            
-            if employee_id:
-                cv2.putText(result_frame, employee_id, (left + 6, bottom - 10), 
-                            cv2.FONT_HERSHEY_DUPLEX, 0.7, (0, 0, 255), 2)
-            
-            if hasattr(self, 'detected_faces'):
-                self.detected_faces[name] = (top, right, bottom, left)
+
+            # Get employee name from database or in-memory cache
+            if employee_id == "Unknown":
+                display_name = "Unknown"
+                display_id = ""
             else:
-                self.detected_faces = {name: (top, right, bottom, left)}
-        
+                display_id = employee_id
+                # Try to get name from in-memory cache first
+                if employee_id in _employees:
+                    display_name = _employees[employee_id].name
+                else:
+                    # Fallback: use employee ID as name
+                    display_name = employee_id
+
+            # Draw name
+            cv2.putText(result_frame, display_name, (left + 6, bottom - 35),
+                        cv2.FONT_HERSHEY_DUPLEX, 0.8, (0, 0, 255), 2)
+
+            # Draw employee ID below name
+            if display_id:
+                cv2.putText(result_frame, display_id, (left + 6, bottom - 10),
+                            cv2.FONT_HERSHEY_DUPLEX, 0.7, (0, 0, 255), 2)
+
+            if hasattr(self, 'detected_faces'):
+                self.detected_faces[employee_id] = (top, right, bottom, left)
+            else:
+                self.detected_faces = {employee_id: (top, right, bottom, left)}
+
         return result_frame
 
 # ============================================================================
@@ -895,56 +948,28 @@ def invalidate_session(token: str):
 
 def _load_employees_from_data():
     """
-    Populate the in-memory employees list from data/employee_faces filenames.
-    Expects files like '800001_First_Last.jpg' or 'First_Last.jpg'.
+    Load employees from DATABASE only. Face images are just for recognition.
+    Filename format: '800001.jpeg' (just the employee ID)
+    Employee names come from database (what user entered in UI).
     """
     try:
-        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        faces_dir = os.path.join(project_root, 'data', 'employee_faces')
-        if not os.path.isdir(faces_dir):
-            print(f"Employees load: faces dir not found at {faces_dir}")
-            return
-        added = 0
-        for file in os.listdir(faces_dir):
-            if not file.lower().endswith(('.png', '.jpg', '.jpeg')):
-                continue
-            base = os.path.splitext(file)[0]
-            # Normalize name from filename
-            parts = base.split('_')
-            emp_id = None
-            name_parts = []
-            if parts and parts[0].isdigit():
-                emp_id = parts[0]
-                name_parts = [p for p in parts[1:] if p]
-            else:
-                name_parts = [p for p in parts if p]
-                # Create a pseudo id from name if not provided
-                emp_id = base.replace('_', '').lower()[:16]
-            if not name_parts:
-                # fallback to base name
-                name = base.replace('_', ' ').strip()
-            else:
-                name = ' '.join(name_parts).strip()
-            # Clean stray trailing characters
-            name = ' '.join([seg for seg in name.split(' ') if seg])
-            # Insert if not present
-            if emp_id not in _employees:
-                _employees[emp_id] = Employee(id=emp_id, name=name)
-                # Also save to database
-                try:
-                    conn = get_db_connection()
-                    cursor = conn.cursor()
-                    cursor.execute('INSERT OR IGNORE INTO employees (employee_id, name) VALUES (?, ?)',
-                                  (emp_id, name))
-                    conn.commit()
-                    conn.close()
-                except Exception as e:
-                    print(f"Warning: Failed to save employee {emp_id} to database: {e}")
-                added += 1
-        if added:
-            print(f"Loaded {added} employees from data/employee_faces")
+        # Load ALL employees from database
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute('SELECT employee_id, name FROM employees')
+        rows = cursor.fetchall()
+        conn.close()
+
+        # Populate in-memory cache from database
+        for row in rows:
+            emp_id = row['employee_id']
+            name = row['name']
+            _employees[emp_id] = Employee(id=emp_id, name=name)
+
+        if rows:
+            print(f"✅ Loaded {len(rows)} employees from database")
     except Exception as e:
-        print(f"Error loading employees from data: {e}")
+        print(f"⚠️  Error loading employees from database: {e}")
 
 # Load employees at startup (module import)
 _load_employees_from_data()
@@ -1090,27 +1115,185 @@ async def create_employee(emp: Employee):
         raise HTTPException(status_code=400, detail="Employee already exists")
 
 @app.patch("/employees/{employee_id}")
-async def update_employee(employee_id: str, name: str = None):
-    """Update employee name - all previous logs will show new name"""
-    if not name:
-        raise HTTPException(status_code=400, detail="Name is required")
+async def update_employee(employee_id: str, new_employee_id: str = None, name: str = None):
+    """Update employee ID and/or name - all previous logs will be updated"""
+    if not name and not new_employee_id:
+        raise HTTPException(status_code=400, detail="At least one of name or new_employee_id is required")
 
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute('UPDATE employees SET name = ? WHERE employee_id = ?', (name, employee_id))
 
-    if cursor.rowcount == 0:
+    # Check if employee exists
+    cursor.execute('SELECT name FROM employees WHERE employee_id = ?', (employee_id,))
+    result = cursor.fetchone()
+    if not result:
         conn.close()
         raise HTTPException(status_code=404, detail="Employee not found")
+
+    current_name = result['name']
+    updated_id = new_employee_id if new_employee_id else employee_id
+    updated_name = name if name else current_name
+
+    # If employee ID is being changed
+    if new_employee_id and new_employee_id != employee_id:
+        # Check if new ID already exists
+        cursor.execute('SELECT employee_id, password, password_reset_required, last_login FROM employees WHERE employee_id = ?', (new_employee_id,))
+        existing = cursor.fetchone()
+
+        if existing:
+            # Special case: If old ID is corrupted (contains spaces/non-digits) and new ID is valid,
+            # merge them by deleting the old one and keeping the new one
+            if (' ' in employee_id or not employee_id.isdigit()) and new_employee_id.isdigit():
+                print(f"🔧 Auto-merging corrupted employee ID: '{employee_id}' -> '{new_employee_id}'")
+
+                # Update attendance records from old ID to new ID
+                cursor.execute('UPDATE attendance SET employee_id = ? WHERE employee_id = ?',
+                             (new_employee_id, employee_id))
+
+                # Update the existing clean record with the new name
+                cursor.execute('UPDATE employees SET name = ? WHERE employee_id = ?',
+                             (updated_name, new_employee_id))
+
+                # Delete the corrupted record
+                cursor.execute('DELETE FROM employees WHERE employee_id = ?', (employee_id,))
+
+                # Update in-memory cache
+                if employee_id in _employees:
+                    _employees.pop(employee_id)
+                if new_employee_id in _employees:
+                    _employees[new_employee_id].name = updated_name
+
+                print(f"✅ Merged corrupted employee into clean record: {new_employee_id}")
+            else:
+                conn.close()
+                raise HTTPException(status_code=400, detail=f"Employee ID {new_employee_id} already exists")
+        else:
+            # Normal case: new ID doesn't exist, proceed with ID change
+            # Get current employee data
+            cursor.execute('SELECT password, password_reset_required, last_login FROM employees WHERE employee_id = ?', (employee_id,))
+            emp_data = cursor.fetchone()
+
+            # SQLite doesn't allow updating PRIMARY KEY, so we need to:
+            # 1. Insert new record with new employee_id
+            cursor.execute('''
+                INSERT INTO employees (employee_id, name, password, password_reset_required, last_login)
+                VALUES (?, ?, ?, ?, ?)
+            ''', (new_employee_id, updated_name, emp_data['password'], emp_data['password_reset_required'], emp_data['last_login']))
+
+            # 2. Update attendance records to point to new employee_id
+            cursor.execute('UPDATE attendance SET employee_id = ? WHERE employee_id = ?', (new_employee_id, employee_id))
+
+            # 3. Delete old record
+            cursor.execute('DELETE FROM employees WHERE employee_id = ?', (employee_id,))
+
+            # Rename face image file (format: ID.jpeg)
+            try:
+                project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                faces_dir = os.path.join(project_root, 'data', 'employee_faces')
+
+                old_filename = f"{employee_id}.jpeg"
+                old_path = os.path.join(faces_dir, old_filename)
+
+                if os.path.exists(old_path):
+                    new_filename = f"{new_employee_id}.jpeg"
+                    new_path = os.path.join(faces_dir, new_filename)
+                    os.rename(old_path, new_path)
+                    print(f"✅ Renamed face image: {old_filename} -> {new_filename}")
+                else:
+                    print(f"⚠️  Face image not found: {old_filename}")
+            except Exception as e:
+                print(f"⚠️  Warning: Could not rename face image file: {e}")
+
+            # Update in-memory cache
+            if employee_id in _employees:
+                emp = _employees.pop(employee_id)
+                emp.id = new_employee_id
+                emp.name = updated_name
+                _employees[new_employee_id] = emp
+
+            print(f"✅ Updated employee ID: {employee_id} -> {new_employee_id}, name: {updated_name}")
+    else:
+        # Only updating name (no ID change)
+        cursor.execute('UPDATE employees SET name = ? WHERE employee_id = ?', (updated_name, employee_id))
+
+        # No need to rename face image file since it's just ID.jpeg (doesn't include name)
+        # Update in-memory cache
+        if employee_id in _employees:
+            _employees[employee_id].name = updated_name
+
+        print(f"✅ Updated employee name: {employee_id} -> {updated_name}")
 
     conn.commit()
     conn.close()
 
-    # Update in-memory cache
-    if employee_id in _employees:
-        _employees[employee_id].name = name
+    return {"employee_id": updated_id, "name": updated_name, "message": "Employee updated successfully"}
 
-    return {"employee_id": employee_id, "name": name, "message": "Employee name updated successfully"}
+@app.delete("/employees/{employee_id}")
+async def delete_employee(employee_id: str):
+    """Delete employee and their face image"""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        # Check if employee exists
+        cursor.execute('SELECT employee_id, name FROM employees WHERE employee_id = ?', (employee_id,))
+        row = cursor.fetchone()
+
+        if not row:
+            conn.close()
+            raise HTTPException(status_code=404, detail="Employee not found")
+
+        employee_name = row['name']
+
+        # Delete from database
+        cursor.execute('DELETE FROM employees WHERE employee_id = ?', (employee_id,))
+
+        # Also delete attendance records (optional - you might want to keep them)
+        # cursor.execute('DELETE FROM attendance WHERE employee_id = ?', (employee_id,))
+
+        conn.commit()
+        conn.close()
+
+        # Delete face image file
+        try:
+            project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            faces_dir = os.path.join(project_root, 'data', 'employee_faces')
+            face_file = os.path.join(faces_dir, f"{employee_id}.jpeg")
+
+            if os.path.exists(face_file):
+                os.remove(face_file)
+                print(f"🗑️  Deleted face image: {employee_id}.jpeg")
+        except Exception as e:
+            print(f"⚠️  Warning: Could not delete face image: {e}")
+
+        # Remove from in-memory cache
+        if employee_id in _employees:
+            _employees.pop(employee_id)
+
+        # Clear face cache to reload without deleted employee
+        cache_file = os.path.join(faces_dir, '.face_encodings_cache.pkl')
+        if os.path.exists(cache_file):
+            try:
+                os.remove(cache_file)
+                print(f"🔄 Face cache cleared for reload")
+            except Exception as e:
+                print(f"⚠️  Could not clear face cache: {e}")
+
+        # Reload FaceRecognizer to remove deleted employee
+        _reload_face_recognizer()
+
+        print(f"✅ Deleted employee: {employee_id} ({employee_name})")
+
+        return {
+            "status": "success",
+            "message": f"Employee {employee_id} ({employee_name}) deleted successfully"
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/employees/upload", response_model=Employee, status_code=status.HTTP_201_CREATED)
 async def upload_employee(
@@ -1120,15 +1303,14 @@ async def upload_employee(
 ):
     """
     Create/Update an employee and save the uploaded face image to data/employee_faces.
-    The image will be stored as {id}_{Name_With_Underscores}.jpg
+    The image will be stored as {id}.jpeg (e.g., 800001.jpeg)
     """
     try:
         if not id or not name:
             raise HTTPException(status_code=400, detail="Employee id and name are required")
-        # Normalize filename
-        safe_name = "_".join([seg for seg in name.strip().split(" ") if seg])
-        filename = f"{id}_{safe_name}.jpeg"
-        # Save file (force JPEG to ensure consistent format)
+
+        # Save file with just ID (e.g., 800001.jpeg)
+        filename = f"{id}.jpeg"
         project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         faces_dir = os.path.join(project_root, 'data', 'employee_faces')
         os.makedirs(faces_dir, exist_ok=True)
@@ -1145,9 +1327,32 @@ async def upload_employee(
             # Fallback: write raw if PIL fails (still .jpeg name)
             with open(dest_path, "wb") as f:
                 f.write(content)
+
+        # Save to database
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute('INSERT OR REPLACE INTO employees (employee_id, name) VALUES (?, ?)', (id, name))
+        conn.commit()
+        conn.close()
+
         # Register/Update employee in memory
         employee = Employee(id=id, name=name)
         _employees[id] = employee
+
+        # Clear face cache so it will reload with new face
+        cache_file = os.path.join(faces_dir, '.face_encodings_cache.pkl')
+        if os.path.exists(cache_file):
+            try:
+                os.remove(cache_file)
+                print(f"🔄 Face cache cleared for reload (new employee: {id})")
+            except Exception as e:
+                print(f"⚠️  Could not clear face cache: {e}")
+
+        # Reload FaceRecognizer to pick up new employee immediately
+        _reload_face_recognizer()
+
+        print(f"✅ Employee {id} ({name}) uploaded successfully and face loaded")
+
         return employee
     except HTTPException:
         raise
@@ -1216,42 +1421,265 @@ async def reset_employee_password(employee_id: str, new_password: str):
 
     return {"message": "Password reset successfully"}
 
-@app.api_route("/employees/reload", methods=["POST", "GET"])
-async def reload_employees():
+@app.post("/database/clear-all")
+async def clear_database():
     """
-    Re-scan data/employee_faces and (re)build the in-memory employees list.
+    ⚠️ DANGER: Clear ALL data from database (employees and attendance).
+    This is useful for cleaning up corrupted data.
+    Employee face images will NOT be deleted - only database records.
     """
     try:
-        # Rebuild a fresh dictionary from faces
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        # Count records before deletion
+        cursor.execute('SELECT COUNT(*) FROM attendance')
+        attendance_count = cursor.fetchone()[0]
+        cursor.execute('SELECT COUNT(*) FROM employees')
+        employee_count = cursor.fetchone()[0]
+
+        print(f"🗑️  Clearing database: {employee_count} employees, {attendance_count} attendance records")
+
+        # Clear all data
+        cursor.execute('DELETE FROM attendance')
+        cursor.execute('DELETE FROM employees')
+        cursor.execute('DELETE FROM alerts')
+        cursor.execute('DELETE FROM cameras')
+
+        conn.commit()
+        conn.close()
+
+        # Clear in-memory cache
+        _employees.clear()
+
+        print("✅ Database cleared successfully")
+
+        return {
+            "status": "success",
+            "message": "Database cleared successfully",
+            "deleted": {
+                "employees": employee_count,
+                "attendance": attendance_count
+            },
+            "note": "Employee face images were NOT deleted. Use /employees/reload to rebuild from face files."
+        }
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/database/migrate-from-filenames")
+async def migrate_names_from_filenames():
+    """
+    ONE-TIME MIGRATION: Extract employee names from old filename format and save to database.
+    Old format: "800001_Victoria_Suchitra_Biswas.jpeg"
+    This will populate the database with names from old filenames.
+    """
+    try:
         project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         faces_dir = os.path.join(project_root, 'data', 'employee_faces')
+
         if not os.path.isdir(faces_dir):
             raise HTTPException(status_code=404, detail=f"Faces directory not found: {faces_dir}")
-        rebuilt: Dict[str, Employee] = {}
+
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        migrated = 0
+        skipped = 0
+
         for file in os.listdir(faces_dir):
             if not file.lower().endswith(('.png', '.jpg', '.jpeg')):
                 continue
+
             base = os.path.splitext(file)[0]
             parts = base.split('_')
-            emp_id = None
-            name_parts = []
-            if parts and parts[0].isdigit():
+
+            # Check if this is old format with name in filename
+            if len(parts) > 1 and parts[0].isdigit():
                 emp_id = parts[0]
-                name_parts = [p for p in parts[1:] if p]
+                name_parts = parts[1:]
+                name = ' '.join(name_parts).strip()
+                name = ' '.join([seg for seg in name.split(' ') if seg])  # Clean extra spaces
+
+                if name and emp_id:
+                    # Update database with extracted name
+                    cursor.execute('INSERT OR REPLACE INTO employees (employee_id, name) VALUES (?, ?)',
+                                 (emp_id, name))
+                    print(f"✅ Migrated: {emp_id} -> {name}")
+                    migrated += 1
             else:
-                name_parts = [p for p in parts if p]
-                emp_id = base.replace('_', '').lower()[:16]
-            name = ' '.join(name_parts).strip() if name_parts else base.replace('_', ' ').strip()
-            name = ' '.join([seg for seg in name.split(' ') if seg])
-            if emp_id and emp_id not in rebuilt:
-                rebuilt[emp_id] = Employee(id=emp_id, name=name)
-        # Replace global employees
+                skipped += 1
+
+        conn.commit()
+        conn.close()
+
+        # Reload in-memory cache
+        _load_employees_from_data()
+
+        message = f"Migration complete: {migrated} names extracted from filenames, {skipped} files skipped"
+        print(f"✅ {message}")
+
+        return {
+            "status": "success",
+            "migrated": migrated,
+            "skipped": skipped,
+            "message": message
+        }
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/database/rename-face-files")
+async def rename_face_files_to_new_format():
+    """
+    Rename old format face files to new format.
+    Old: "800001_Victoria_Suchitra_Biswas.jpeg"
+    New: "800001.jpeg"
+    Run this AFTER migrating names to database.
+    """
+    try:
+        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        faces_dir = os.path.join(project_root, 'data', 'employee_faces')
+
+        if not os.path.isdir(faces_dir):
+            raise HTTPException(status_code=404, detail=f"Faces directory not found: {faces_dir}")
+
+        renamed = 0
+        skipped = 0
+
+        for file in os.listdir(faces_dir):
+            if not file.lower().endswith(('.png', '.jpg', '.jpeg')):
+                continue
+
+            base = os.path.splitext(file)[0]
+            ext = os.path.splitext(file)[1]
+            parts = base.split('_')
+
+            # Check if this is old format with name in filename
+            if len(parts) > 1 and parts[0].isdigit():
+                emp_id = parts[0]
+                old_path = os.path.join(faces_dir, file)
+                new_filename = f"{emp_id}.jpeg"
+                new_path = os.path.join(faces_dir, new_filename)
+
+                # Only rename if new filename doesn't exist
+                if not os.path.exists(new_path):
+                    os.rename(old_path, new_path)
+                    print(f"✅ Renamed: {file} -> {new_filename}")
+                    renamed += 1
+                else:
+                    print(f"⚠️  Skipped (already exists): {new_filename}")
+                    skipped += 1
+            elif base.isdigit():
+                # Already in new format
+                skipped += 1
+
+        # Clear face cache so it will reload with new filenames
+        cache_file = os.path.join(faces_dir, '.face_encodings_cache.pkl')
+        if os.path.exists(cache_file):
+            os.remove(cache_file)
+            print("🔄 Face cache cleared for reload")
+
+        message = f"Rename complete: {renamed} files renamed, {skipped} files skipped"
+        print(f"✅ {message}")
+
+        return {
+            "status": "success",
+            "renamed": renamed,
+            "skipped": skipped,
+            "message": message,
+            "note": "Restart backend to reload faces with new filenames"
+        }
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/face-cache/clear")
+async def clear_face_cache():
+    """
+    Clear face encodings cache to force reload from images.
+    Useful when face images are updated or corrupted.
+    """
+    try:
+        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        faces_dir = os.path.join(project_root, 'data', 'employee_faces')
+        cache_file = os.path.join(faces_dir, '.face_encodings_cache.pkl')
+
+        if os.path.exists(cache_file):
+            os.remove(cache_file)
+            print("✅ Face encodings cache cleared")
+            return {
+                "status": "success",
+                "message": "Face cache cleared. Restart backend to reload faces from images."
+            }
+        else:
+            return {
+                "status": "success",
+                "message": "No cache file found (already cleared)"
+            }
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.api_route("/employees/reload", methods=["POST", "GET"])
+async def reload_employees():
+    """
+    Reload employees from database and clean up any corrupted employee IDs.
+    Employee names come from database (what you entered in UI), NOT from face filenames.
+    Face images are only used for face recognition, not for employee data.
+    """
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        # Clean up corrupted employee IDs (ones with spaces or non-numeric)
+        cursor.execute('SELECT employee_id, name, password, password_reset_required, last_login FROM employees')
+        all_employees = cursor.fetchall()
+
+        employees_to_delete = []
+        for row in all_employees:
+            old_id = row['employee_id']
+
+            # Check if this employee ID is invalid (contains spaces or not numeric)
+            if ' ' in old_id or not old_id.isdigit():
+                print(f"🗑️  Removing invalid employee ID: '{old_id}'")
+                employees_to_delete.append(old_id)
+
+        # Delete invalid entries
+        for emp_id in employees_to_delete:
+            cursor.execute('DELETE FROM employees WHERE employee_id = ?', (emp_id,))
+            cursor.execute('DELETE FROM attendance WHERE employee_id = ?', (emp_id,))
+
+        # Load all valid employees from database
+        cursor.execute('SELECT employee_id, name FROM employees')
+        rows = cursor.fetchall()
+
+        conn.commit()
+        conn.close()
+
+        # Update in-memory cache
         _employees.clear()
-        _employees.update(rebuilt)
-        return {"status": "ok", "count": len(_employees)}
+        for row in rows:
+            emp_id = row['employee_id']
+            name = row['name']
+            _employees[emp_id] = Employee(id=emp_id, name=name)
+
+        print(f"✅ Reloaded {len(_employees)} employees from database ({len(employees_to_delete)} invalid removed)")
+        return {
+            "status": "ok",
+            "count": len(_employees),
+            "cleaned": len(employees_to_delete),
+            "message": f"Loaded {len(_employees)} employees from database"
+        }
     except HTTPException:
         raise
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/employees/{emp_id}", response_model=Employee)
@@ -1464,18 +1892,36 @@ def _camera_capture_thread(camera_index: int):
                 # Log attendance for recognized faces (avoid duplicates within 5 seconds)
                 if last_face_results and camera_role in ["entry", "exit"]:
                     current_time = time.time()
-                    for face_location, face_name in last_face_results:
+                    for face_location, employee_id in last_face_results:
+                        # Note: employee_id is now the recognized ID (e.g., "800001") from face recognition
                         # Check if we've logged this person recently
-                        last_log_time = _last_attendance_log[camera_id].get(face_name, 0)
+                        last_log_time = _last_attendance_log[camera_id].get(employee_id, 0)
                         if current_time - last_log_time >= 5.0:  # 5 second cooldown
                             try:
-                                # Get employee ID
-                                employee_id = face_rec.known_face_ids.get(face_name, face_name) if face_name != "Unknown" else "Unknown"
+                                if employee_id == "Unknown":
+                                    employee_name = "Unknown"
+                                else:
+                                    # Fetch employee name from database
+                                    employee_name = employee_id  # Default fallback
+                                    if employee_id in _employees:
+                                        employee_name = _employees[employee_id].name
+                                    else:
+                                        # Try to fetch from database
+                                        try:
+                                            conn = get_db_connection()
+                                            cursor = conn.cursor()
+                                            cursor.execute('SELECT name FROM employees WHERE employee_id = ?', (employee_id,))
+                                            row = cursor.fetchone()
+                                            if row:
+                                                employee_name = row['name']
+                                            conn.close()
+                                        except Exception as e:
+                                            print(f"⚠️  Failed to fetch name for {employee_id}: {e}")
 
                                 # Create attendance record
                                 attendance_record = AttendanceRecord(
                                     employee_id=employee_id,
-                                    name=face_name,
+                                    name=employee_name,
                                     timestamp=get_bangladesh_timestamp(),
                                     camera_id=camera_id,
                                     entry_type=camera_role
@@ -1483,11 +1929,11 @@ def _camera_capture_thread(camera_index: int):
 
                                 # Save to database
                                 save_attendance_to_db(attendance_record)
-                                _last_attendance_log[camera_id][face_name] = current_time
+                                _last_attendance_log[camera_id][employee_id] = current_time
 
-                                print(f"✅ [{camera_id}] Logged attendance: {face_name} ({employee_id}) as {camera_role}")
+                                print(f"✅ [{camera_id}] Logged attendance: {employee_name} (ID: {employee_id}) as {camera_role}")
                             except Exception as e:
-                                print(f"⚠️  Failed to log attendance for {face_name}: {e}")
+                                print(f"⚠️  Failed to log attendance for {employee_id}: {e}")
 
                 # Draw detection overlays
                 frame = body_det.draw_boxes(frame, last_body_boxes)
@@ -1688,6 +2134,16 @@ def _get_global_detectors():
             print("✅ Global FaceRecognizer initialized")
 
     return _global_body_detector, _global_face_recognizer
+
+def _reload_face_recognizer():
+    """Reload the global FaceRecognizer (e.g., when new employee is added)"""
+    global _global_face_recognizer
+
+    with _detector_lock:
+        print("🔄 Reloading FaceRecognizer...")
+        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        _global_face_recognizer = FaceRecognizer(os.path.join(project_root, 'data', 'employee_faces'))
+        print("✅ FaceRecognizer reloaded")
 
 @app.post("/process_frame")
 async def process_frame(frame: UploadFile = File(...)):

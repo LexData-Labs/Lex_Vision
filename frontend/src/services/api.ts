@@ -120,13 +120,18 @@ export const api = {
       method: "POST",
       body: JSON.stringify(emp),
     }),
-  updateEmployee: (employeeId: string, name: string) => {
+  updateEmployee: (employeeId: string, data: { newEmployeeId?: string; name?: string }) => {
     const params = new URLSearchParams();
-    params.append("name", name);
+    if (data.newEmployeeId) params.append("new_employee_id", data.newEmployeeId);
+    if (data.name) params.append("name", data.name);
     return request<{ employee_id: string; name: string; message: string }>(`/employees/${employeeId}?${params.toString()}`, {
       method: "PATCH",
     });
   },
+  deleteEmployee: (employeeId: string) =>
+    request<{ status: string; message: string }>(`/employees/${employeeId}`, {
+      method: "DELETE",
+    }),
   reloadEmployees: () => request<{ status: string; count: number }>("/employees/reload", { method: "POST" }),
   uploadEmployee: async (data: { id: string; name: string; file: File }) => {
     const formData = new FormData();
@@ -184,6 +189,12 @@ export const api = {
       method: "POST",
     });
   },
+
+  // Database Management API
+  clearDatabase: () =>
+    request<{ status: string; message: string; deleted: { employees: number; attendance: number }; note: string }>("/database/clear-all", {
+      method: "POST",
+    }),
 
   getVideoFeedUrl: (cameraIndex?: number) => {
     // Video feeds use direct backend endpoint (HTTP, port 8000)

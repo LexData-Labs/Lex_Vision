@@ -39,7 +39,8 @@ export default function Users() {
   
   // Form state for Add/Edit User
   const [formData, setFormData] = useState({
-    username: "",
+    employeeId: "",
+    name: "",
     email: "",
     role: "employee" as "administrator" | "employee" | "viewer",
     department: "",
@@ -55,8 +56,8 @@ export default function Users() {
         const employees = await api.employees();
         // Map minimal backend employee -> UI User with sensible defaults
         const mapped: User[] = employees.map((e) => ({
-          id: e.id,
-          username: e.name || e.id,
+          id: e.id.trim(),
+          username: (e.name || e.id).trim(),
           email: "",
           role: "employee",
           status: "active",
@@ -84,8 +85,8 @@ export default function Users() {
       await api.reloadEmployees();
       const employees = await api.employees();
       const mapped: User[] = employees.map((e) => ({
-        id: e.id,
-        username: e.name || e.id,
+        id: e.id.trim(),
+        username: (e.name || e.id).trim(),
         email: "",
         role: "employee",
         status: "active",
@@ -179,9 +180,20 @@ export default function Users() {
     ));
   };
 
-  const deleteUser = (userId: string) => {
-    if (window.confirm("Are you sure you want to delete this user?")) {
-      setUsers(prev => prev.filter(user => user.id !== userId));
+  const deleteUser = async (userId: string, userName: string) => {
+    if (window.confirm(`Are you sure you want to delete employee ${userId} (${userName})?\n\nThis will:\n- Delete the employee record\n- Delete their face image\n- Keep their attendance history`)) {
+      try {
+        await api.deleteEmployee(userId);
+
+        // Remove from local state
+        setUsers(prev => prev.filter(user => user.id !== userId));
+        setFilteredUsers(prev => prev.filter(user => user.id !== userId));
+
+        alert(`Employee ${userId} (${userName}) deleted successfully`);
+      } catch (error) {
+        console.error("Failed to delete employee:", error);
+        alert(`Failed to delete employee: ${(error as Error).message}`);
+      }
     }
   };
 
@@ -195,8 +207,8 @@ export default function Users() {
       // Reload employees from backend
       const employees = await api.employees();
       const mapped: User[] = employees.map((e) => ({
-        id: e.id,
-        username: e.name || e.id,
+        id: e.id.trim(),
+        username: (e.name || e.id).trim(),
         email: "",
         role: "employee",
         status: "active",
@@ -219,48 +231,69 @@ export default function Users() {
   };
 
   const handleEditUser = async () => {
-    if (!editingUser || !formData.username) {
-      alert("Please enter a name");
+    if (!editingUser || !formData.employeeId.trim() || !formData.name.trim()) {
+      alert("Please enter both employee ID and name");
       return;
     }
 
+    // Trim whitespace
+    const trimmedId = formData.employeeId.trim();
+    const trimmedName = formData.name.trim();
+
     try {
-      // Update employee name in backend - this will update all previous attendance logs
-      await api.updateEmployee(editingUser.id, formData.username);
+      // Check if employee ID or name changed
+      const idChanged = trimmedId !== editingUser.id;
+      const nameChanged = trimmedName !== editingUser.username;
 
-      // Update local state
-      setUsers(prev =>
-        prev.map(user =>
-          user.id === editingUser.id
-            ? {
-                ...user,
-                username: formData.username,
-                email: formData.email,
-                role: formData.role,
-                department: formData.department || undefined,
-                permissions: formData.role === "administrator" ? ["all"] : ["view_cameras", "view_logs"],
-              }
-            : user
-        )
-      );
+      if (!idChanged && !nameChanged) {
+        alert("No changes detected");
+        setIsEditUserOpen(false);
+        return;
+      }
 
-      alert("Employee name updated! All previous logs now show the new name.");
-      setFormData({ username: "", email: "", role: "employee", department: "" });
+      // Update employee in backend - this will update all previous attendance logs
+      const result = await api.updateEmployee(editingUser.id, {
+        newEmployeeId: idChanged ? trimmedId : undefined,
+        name: trimmedName,
+      });
+
+      // Reload employees from backend to get updated data
+      const employees = await api.employees();
+      const mapped: User[] = employees.map((e) => ({
+        id: e.id.trim(),
+        username: (e.name || e.id).trim(),
+        email: "",
+        role: "employee",
+        status: "active",
+        createdAt: new Date().toISOString(),
+        permissions: [],
+        department: undefined,
+        faceRegistered: false,
+        has_password: e.has_password,
+        password_reset_required: e.password_reset_required,
+        lastLogin: e.last_login || undefined,
+      }));
+      setUsers(mapped);
+      setFilteredUsers(mapped);
+
+      alert("Employee updated successfully! All previous logs have been updated.");
+      setFormData({ employeeId: "", name: "", email: "", role: "employee", department: "" });
       setEditingUser(null);
       setIsEditUserOpen(false);
     } catch (error) {
       console.error("Failed to update employee:", error);
-      alert("Failed to update employee name. Please try again.");
+      alert(`Failed to update employee: ${(error as Error).message}`);
     }
   };
 
   const openEditDialog = (user: User) => {
     setEditingUser(user);
     setFormData({
-      username: user.username,
-      email: user.email,
+      employeeId: user.id.trim(),
+      name: user.username.trim(),
+      email: user.email.trim(),
       role: user.role,
-      department: user.department || "",
+      department: user.department?.trim() || "",
     });
     setIsEditUserOpen(true);
   };
@@ -581,7 +614,7 @@ export default function Users() {
                   <Button
                     size="sm"
                     variant="destructive"
-                    onClick={() => deleteUser(user.id)}
+                    onClick={() => deleteUser(user.id, user.username)}
                   >
                     <Trash2 className="h-4 w-4" />
                   </Button>
@@ -611,13 +644,23 @@ export default function Users() {
           </DialogHeader>
           <div className="grid gap-4 py-4">
             <div className="grid grid-cols-4 items-center gap-4">
-              <Label htmlFor="edit-username" className="text-right">Username</Label>
+              <Label htmlFor="edit-employee-id" className="text-right">Employee ID</Label>
               <Input
-                id="edit-username"
+                id="edit-employee-id"
                 className="col-span-3"
-                value={formData.username}
-                onChange={(e) => setFormData({ ...formData, username: e.target.value })}
-                placeholder="Enter username"
+                value={formData.employeeId}
+                onChange={(e) => setFormData({ ...formData, employeeId: e.target.value })}
+                placeholder="Enter employee ID (numbers only)"
+              />
+            </div>
+            <div className="grid grid-cols-4 items-center gap-4">
+              <Label htmlFor="edit-name" className="text-right">Name</Label>
+              <Input
+                id="edit-name"
+                className="col-span-3"
+                value={formData.name}
+                onChange={(e) => setFormData({ ...formData, name: e.target.value })}
+                placeholder="Enter employee name"
               />
             </div>
             <div className="grid grid-cols-4 items-center gap-4">
@@ -664,7 +707,7 @@ export default function Users() {
               onClick={() => {
                 setIsEditUserOpen(false);
                 setEditingUser(null);
-                setFormData({ username: "", email: "", role: "employee", department: "" });
+                setFormData({ employeeId: "", name: "", email: "", role: "employee", department: "" });
               }}
             >
               Cancel

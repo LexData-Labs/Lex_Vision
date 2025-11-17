@@ -6,7 +6,9 @@ export interface User {
   username: string;
   role: 'administrator' | 'employee';
   employee_id: string;
+  name?: string;
   password_reset_required: boolean;
+  last_login?: string;
 }
 
 interface AuthContextType {
@@ -16,6 +18,7 @@ interface AuthContextType {
   isAuthenticated: boolean;
   isLoading: boolean;
   sessionToken: string | null;
+  updatePasswordResetStatus: (required: boolean) => void;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
@@ -66,6 +69,7 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
         username: res.name,
         role: role,
         employee_id: res.employee_id,
+        name: res.name,
         password_reset_required: res.password_reset_required
       };
 
@@ -101,13 +105,22 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
     navigate('/login');
   };
 
+  const updatePasswordResetStatus = (required: boolean) => {
+    if (user) {
+      const updatedUser = { ...user, password_reset_required: required };
+      setUser(updatedUser);
+      sessionStorage.setItem('passwordResetRequired', String(required));
+    }
+  };
+
   const value: AuthContextType = {
     user,
     login,
     logout,
     isAuthenticated: !!user,
     isLoading,
-    sessionToken
+    sessionToken,
+    updatePasswordResetStatus
   };
 
   return (

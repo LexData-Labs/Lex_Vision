@@ -35,9 +35,9 @@ const adminItems = [
 ];
 
 const employeeItems = [
-  { title: "Dashboard", url: "/dashboard", icon: LayoutDashboard },
-  { title: "My Logs", url: "/my-logs", icon: FileText },
-  { title: "Profile", url: "/profile", icon: User },
+  { title: "Dashboard", url: "/employee/dashboard", icon: LayoutDashboard },
+  { title: "My Logs", url: "/employee/my-logs", icon: FileText },
+  { title: "Profile", url: "/employee/profile", icon: User },
 ];
 
 export function AppSidebar({ userRole }: AppSidebarProps) {
