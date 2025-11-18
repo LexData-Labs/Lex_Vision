@@ -7,7 +7,15 @@
       "Bash(findstr:*)",
       "Bash(taskkill //F //PID 8868)",
       "Bash(python backend.py:*)",
-      "Bash(timeout:*)"
+      "Bash(timeout:*)",
+      "Bash(python -m py_compile:*)",
+      "Bash(npm run build:*)",
+      "Bash(taskkill:*)",
+      "Bash(ping:*)",
+      "Bash(nul)",
+      "Bash(venvScriptspython.exe backendbackend.py)",
+      "Bash(\"venv\\Scripts\\python.exe\" \"backend\\backend.py\")",
+      "Bash(curl:*)"
     ],
     "deny": [],
     "ask": []

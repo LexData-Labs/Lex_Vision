@@ -876,7 +876,7 @@ class Alert(BaseModel):
 class CameraConfig(BaseModel):
     id: str
     name: str
-    role: str  # "entry", "exit", "live", "none"
+    role: str  # "entry", "exit", "live", "background-entry", "background-exit", "none"
     status: str  # "online", "offline"
 
 # In-memory stores
@@ -899,6 +899,12 @@ _capture_threads: Dict[int, threading.Thread] = {}  # Background capture threads
 _thread_stop_events: Dict[int, threading.Event] = {}  # Stop signals
 _frame_ready_events: Dict[int, threading.Event] = {}  # Signal when new frame is available
 _last_attendance_log: Dict[str, Dict[str, float]] = defaultdict(dict)  # Track last log time per person per camera
+
+# Memory management configuration
+MAX_FRAME_BUFFER_SIZE = 300 * 1024  # 300 KB max per frame (will reduce quality if exceeded)
+MEMORY_WARNING_THRESHOLD = 75  # % - Start warning
+MEMORY_CRITICAL_THRESHOLD = 85  # % - Start skipping frames
+MEMORY_EMERGENCY_THRESHOLD = 90  # % - Emergency recovery
 
 # Authentication
 _active_sessions: Dict[str, Dict[str, Any]] = {}  # session_token -> {employee_id, role, expires_at}
@@ -1138,7 +1144,11 @@ async def update_employee(employee_id: str, new_employee_id: str = None, name: s
         raise HTTPException(status_code=404, detail="Employee not found")
 
     current_name = result['name']
-    current_role = result.get('role', 'employee')
+    # sqlite3.Row doesn't have .get() method, use dict() or try/except
+    try:
+        current_role = result['role'] if result['role'] else 'employee'
+    except (KeyError, IndexError):
+        current_role = 'employee'
     updated_id = new_employee_id if new_employee_id else employee_id
     updated_name = name if name else current_name
     updated_role = role if role else current_role
@@ -1848,34 +1858,101 @@ def _camera_capture_thread(camera_index: int):
         body_det, face_rec = _get_global_detectors()
         cap, _ = _open_video_capture_by_index(camera_index)
 
-        # Optimal settings
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
-        cap.set(cv2.CAP_PROP_FPS, 30)
-        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        # Memory-efficient settings for multiple cameras
+        # Reduced resolution to prevent memory issues
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)  # Reduced from 1280
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)  # Reduced from 720
+        cap.set(cv2.CAP_PROP_FPS, 15)  # Reduced from 30
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # Minimize buffer
 
         frame_count = 0
-        detection_interval = 4
+        # Adaptive detection interval based on camera role
+        # For background modes, detect less frequently for smooth video
+        detection_interval = 4  # Default for entry/exit with boxes
         last_body_boxes = []
         last_face_results = []
+        memory_error_count = 0
+        max_memory_errors = 3
 
         print(f"✅ Shared capture thread for {camera_id} initialized")
 
         while not stop_event.is_set():
-            success, frame = cap.read()
-            if not success or frame is None:
-                time.sleep(0.01)
+            try:
+                success, frame = cap.read()
+                if not success or frame is None:
+                    time.sleep(0.01)
+                    continue
+
+                # Reset memory error counter on successful read
+                memory_error_count = 0
+
+            except (cv2.error, SystemError, MemoryError) as e:
+                memory_error_count += 1
+                print(f"⚠️  Memory error #{memory_error_count} in {camera_id}: {e}")
+
+                if memory_error_count >= max_memory_errors:
+                    print(f"❌ Too many memory errors for {camera_id}, stopping thread")
+                    break
+
+                # Aggressive memory recovery
+                import gc
+                print(f"🔄 {camera_id} - Starting aggressive memory recovery...")
+
+                # Clear any existing frames for this camera
+                if camera_index in _latest_frames:
+                    del _latest_frames[camera_index]
+
+                # Force multiple GC cycles to promote generations
+                gc.collect()
+                gc.collect()
+                gc.collect()
+
+                # Log memory status
+                if psutil:
+                    mem = psutil.virtual_memory()
+                    print(f"💾 {camera_id} - Memory after GC: {mem.percent}% used, {mem.available / (1024**3):.2f} GB available")
+
+                time.sleep(2.0)  # Longer pause for memory to stabilize
+
+                # Try to recreate the capture
+                try:
+                    cap.release()
+                    time.sleep(1.0)  # Longer wait before reopening
+                    cap, _ = _open_video_capture_by_index(camera_index)
+                    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+                    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+                    cap.set(cv2.CAP_PROP_FPS, 15)
+                    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                    print(f"✅ Camera {camera_id} reinitialized after memory error")
+                except Exception as reinit_error:
+                    print(f"❌ Failed to reinitialize {camera_id}: {reinit_error}")
+                    break
                 continue
 
             frame_count += 1
 
+            # Check memory pressure before detection
+            skip_detection = False
+            if psutil:
+                mem = psutil.virtual_memory()
+                if mem.percent > MEMORY_CRITICAL_THRESHOLD:
+                    skip_detection = True
+
             # Check camera role - skip detection for "live" cameras
             camera_role = _cameras.get(camera_id).role if camera_id in _cameras else "none"
 
-            # Only perform detection if camera is not in "live" mode
-            if camera_role != "live":
+            # Adaptive detection interval based on camera role for smooth video
+            if camera_role in ["background-entry", "background-exit"]:
+                # Much less frequent detection for smooth video (like live mode speed)
+                current_detection_interval = 15  # Detect every 15 frames for smooth playback
+            else:
+                current_detection_interval = detection_interval  # Normal interval (every 4 frames)
+
+            # Only perform detection if camera is not in "live" mode and memory is OK
+            # Include background-entry and background-exit in detection
+            if camera_role not in ["live", "none"] and not skip_detection:
                 # Perform detection every N frames
-                if frame_count % detection_interval == 0:
+                if frame_count % current_detection_interval == 0:
                     try:
                         with _detector_lock:
                             last_body_boxes = body_det.detect(frame, 0.3)
@@ -1899,8 +1976,16 @@ def _camera_capture_thread(camera_index: int):
                         print(f"⚠️  Detection error in {camera_id}: {e}")
 
                 # Log attendance for recognized faces (avoid duplicates within 5 seconds)
-                if last_face_results and camera_role in ["entry", "exit"]:
+                if last_face_results and camera_role in ["entry", "exit", "background-entry", "background-exit"]:
                     current_time = time.time()
+
+                    # Determine the entry_type for logging based on camera role
+                    entry_type = camera_role
+                    if camera_role == "background-entry":
+                        entry_type = "entry"
+                    elif camera_role == "background-exit":
+                        entry_type = "exit"
+
                     for face_location, employee_id in last_face_results:
                         # Note: employee_id is now the recognized ID (e.g., "800001") from face recognition
                         # Check if we've logged this person recently
@@ -1927,36 +2012,112 @@ def _camera_capture_thread(camera_index: int):
                                         except Exception as e:
                                             print(f"⚠️  Failed to fetch name for {employee_id}: {e}")
 
-                                # Create attendance record
+                                # Create attendance record with proper entry_type
                                 attendance_record = AttendanceRecord(
                                     employee_id=employee_id,
                                     name=employee_name,
                                     timestamp=get_bangladesh_timestamp(),
                                     camera_id=camera_id,
-                                    entry_type=camera_role
+                                    entry_type=entry_type
                                 )
 
                                 # Save to database
                                 save_attendance_to_db(attendance_record)
                                 _last_attendance_log[camera_id][employee_id] = current_time
 
-                                print(f"✅ [{camera_id}] Logged attendance: {employee_name} (ID: {employee_id}) as {camera_role}")
+                                print(f"✅ [{camera_id}] Logged attendance: {employee_name} (ID: {employee_id}) as {entry_type} (camera role: {camera_role})")
                             except Exception as e:
                                 print(f"⚠️  Failed to log attendance for {employee_id}: {e}")
 
-                # Draw detection overlays
-                frame = body_det.draw_boxes(frame, last_body_boxes)
-                frame = face_rec.draw_faces(frame, last_face_results)
+                # Draw detection overlays (skip for background roles - show clean video but still log)
+                if camera_role not in ["background-entry", "background-exit"]:
+                    frame = body_det.draw_boxes(frame, last_body_boxes)
+                    frame = face_rec.draw_faces(frame, last_face_results)
             # For "live" cameras, skip all detection and drawing - just show raw video
+            # For "background-entry/exit" cameras, run detection and log but don't draw overlays
 
-            # Encode to JPEG
-            ret, jpeg = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
-            if ret:
-                # Store JPEG frame for ALL viewers to read
-                _latest_frames[camera_index] = jpeg.tobytes()
-                frame_ready.set()  # Signal that new frame is available
+            # Check memory before encoding to prevent OOM
+            memory_ok = True
+            if psutil:
+                mem = psutil.virtual_memory()
+                if mem.percent > MEMORY_WARNING_THRESHOLD:
+                    print(f"⚠️  High memory usage ({mem.percent}%), triggering cleanup")
+                    import gc
+                    gc.collect()
 
-            time.sleep(0.01)  # Small delay to prevent CPU overload
+                # Skip frame processing entirely if memory is in emergency state
+                if mem.percent > MEMORY_EMERGENCY_THRESHOLD:
+                    print(f"🆘 Emergency memory state ({mem.percent}%), skipping frame")
+                    memory_ok = False
+                    time.sleep(0.1)
+
+            if memory_ok:
+                # Encode to JPEG with memory-efficient settings
+                # Lower quality for multiple cameras to save memory
+                jpeg_quality = 60  # Reduced from 75 to save memory
+                ret, jpeg = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, jpeg_quality])
+                if ret:
+                    # Convert to bytes once
+                    frame_bytes = jpeg.tobytes()
+
+                    # Memory safety: limit frame size using global constant
+                    if len(frame_bytes) > MAX_FRAME_BUFFER_SIZE:
+                        print(f"⚠️  Frame too large ({len(frame_bytes)} bytes), reducing quality")
+                        # Clean up before re-encoding
+                        del jpeg
+                        # Re-encode with lower quality
+                        ret, jpeg = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 40])
+                        if ret:
+                            frame_bytes = jpeg.tobytes()
+                        else:
+                            frame_bytes = None
+
+                    if frame_bytes:
+                        # Store a copy to prevent reference issues with multiple readers
+                        _latest_frames[camera_index] = bytes(frame_bytes)
+                        frame_ready.set()  # Signal that new frame is available
+
+                    # Explicit cleanup
+                    del jpeg
+                    if frame_bytes:
+                        del frame_bytes
+
+            # Cleanup frame and force memory release
+            del frame
+
+            # More aggressive numpy cleanup
+            try:
+                import ctypes
+                ctypes.CDLL('msvcrt', use_errno=True).malloc_trim(0)
+            except:
+                pass
+
+            # More aggressive periodic garbage collection for long-running threads
+            if frame_count % 50 == 0:  # More frequent GC (was 100)
+                import gc
+                gc.collect()
+                if psutil:
+                    mem = psutil.virtual_memory()
+                    print(f"🧠 {camera_id} - Frame {frame_count}, Memory: {mem.percent}% used, Available: {mem.available / (1024**3):.2f} GB")
+
+                    # If memory is getting critically low, force more aggressive cleanup
+                    if mem.percent > 80:
+                        gc.collect()
+                        gc.collect()  # Run twice for generation promotion
+                        print(f"🔥 {camera_id} - Aggressive GC triggered at {mem.percent}% memory usage")
+
+            # Adaptive frame rate based on memory pressure
+            base_delay = 0.02  # ~50 FPS
+            if psutil:
+                mem = psutil.virtual_memory()
+                if mem.percent > MEMORY_EMERGENCY_THRESHOLD:
+                    base_delay = 0.1  # ~10 FPS under extreme pressure
+                elif mem.percent > MEMORY_CRITICAL_THRESHOLD:
+                    base_delay = 0.05  # ~20 FPS under high pressure
+                elif mem.percent > MEMORY_WARNING_THRESHOLD:
+                    base_delay = 0.033  # ~30 FPS under moderate pressure
+
+            time.sleep(base_delay)
 
     except Exception as e:
         print(f"❌ Shared capture thread error for {camera_id}: {e}")
@@ -1967,6 +2128,14 @@ def _camera_capture_thread(camera_index: int):
             cap.release()
         except:
             pass
+
+        # Cleanup on exit
+        if camera_index in _latest_frames:
+            del _latest_frames[camera_index]
+
+        import gc
+        gc.collect()
+
         print(f"🛑 Shared capture thread for {camera_id} stopped")
 
 
@@ -1978,6 +2147,26 @@ def generate_mjpeg_for_camera(camera_index: int, conf_threshold: float = 0.3):
     camera_id = f"CAM-{camera_index}"
     import numpy as np
     camera_lock = _camera_locks[camera_index]
+
+    # Check memory before allowing new viewer
+    if psutil:
+        mem = psutil.virtual_memory()
+        if mem.percent > MEMORY_CRITICAL_THRESHOLD:
+            print(f"⚠️  High memory usage ({mem.percent}%), limiting new viewers")
+            # Check if too many viewers already
+            total_viewers = sum(_active_camera_streams.values())
+            if total_viewers > 8:  # Limit total viewers across all cameras
+                print(f"🚫 Too many viewers ({total_viewers}) under memory pressure, rejecting connection")
+                # Return a simple error frame
+                error_frame = np.zeros((480, 640, 3), dtype=np.uint8)
+                cv2.putText(error_frame, "Server Overloaded", (150, 200),
+                           cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 0, 255), 3)
+                cv2.putText(error_frame, "Please try again later", (120, 250),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+                ret, jpeg = cv2.imencode('.jpg', error_frame)
+                if ret:
+                    yield (b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + jpeg.tobytes() + b'\r\n')
+                return
 
     # Track viewer connection
     with camera_lock:
@@ -2016,13 +2205,18 @@ def generate_mjpeg_for_camera(camera_index: int, conf_threshold: float = 0.3):
             try:
                 # Get latest frame from shared buffer
                 if camera_index in _latest_frames:
-                    frame_bytes = _latest_frames[camera_index]
+                    # CRITICAL: Create a copy to prevent holding references
+                    # This ensures the original frame can be garbage collected
+                    frame_bytes = bytes(_latest_frames[camera_index])
 
                     # Yield the JPEG frame as MJPEG multipart
                     yield (b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
                     frames_yielded += 1
                     no_frame_count = 0  # Reset no-frame counter
                     last_frame_time = time.time()
+
+                    # Explicit cleanup of frame copy
+                    del frame_bytes
 
                     # Log progress every 100 frames
                     if frames_yielded % 100 == 0:
@@ -2689,6 +2883,20 @@ def process_video(video_path, output_path=None, show_display=True, conf_threshol
 
 def main():
     """Main entry point - automatically starts the FastAPI server with video processing and GPU optimization"""
+    # OpenCV memory optimizations
+    print("🔧 Applying OpenCV optimizations...")
+    cv2.setUseOptimized(True)
+    cv2.setNumThreads(2)  # Limit OpenCV threads to reduce memory overhead
+
+    # Check system memory at startup
+    if psutil:
+        mem = psutil.virtual_memory()
+        print(f"💾 System Memory: {mem.percent}% used, {mem.available / (1024**3):.2f} GB available")
+        if mem.percent > 70:
+            print(f"⚠️  WARNING: High memory usage at startup ({mem.percent}%). Consider closing other applications.")
+        if mem.available < 2 * (1024**3):  # Less than 2 GB available
+            print(f"🚨 WARNING: Low available memory ({mem.available / (1024**3):.2f} GB). System may experience issues with multiple cameras.")
+
     # Check if CPU mode is forced via environment variable
     force_cpu = os.getenv("FORCE_CPU", "1").lower() in ("1", "true", "yes")
 
