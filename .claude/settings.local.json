@@ -8,7 +8,18 @@
       "Bash(taskkill //F //PID 8868)",
       "Bash(python backend.py:*)",
       "Bash(timeout:*)",
+<<<<<<< HEAD
       "Bash(mkdir:*)"
+=======
+      "Bash(python -m py_compile:*)",
+      "Bash(npm run build:*)",
+      "Bash(taskkill:*)",
+      "Bash(ping:*)",
+      "Bash(nul)",
+      "Bash(venvScriptspython.exe backendbackend.py)",
+      "Bash(\"venv\\Scripts\\python.exe\" \"backend\\backend.py\")",
+      "Bash(curl:*)"
+>>>>>>> 74a6d6c5e2fb3baf2e9689d314f0770e7ac249df
     ],
     "deny": [],
     "ask": []

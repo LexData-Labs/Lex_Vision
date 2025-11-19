@@ -162,7 +162,7 @@ export default function AdminSettings() {
     setModels(models.filter(model => model.id !== id));
   };
 
-  const updateCameraRole = async (cameraId: string, role: "entry" | "exit" | "live" | "none") => {
+  const updateCameraRole = async (cameraId: string, role: "entry" | "exit" | "live" | "background-entry" | "background-exit" | "none") => {
     try {
       // Update on backend
       await api.updateCamera(cameraId, role);
@@ -192,6 +192,10 @@ export default function AdminSettings() {
         return <Badge className="bg-blue-500">Exit</Badge>;
       case "live":
         return <Badge className="bg-purple-500">Live View</Badge>;
+      case "background-entry":
+        return <Badge className="bg-orange-500">Background Entry</Badge>;
+      case "background-exit":
+        return <Badge className="bg-amber-500">Background Exit</Badge>;
       default:
         return <Badge variant="secondary">Not Assigned</Badge>;
     }
@@ -434,15 +438,17 @@ export default function AdminSettings() {
                         </Label>
                         <Select
                           value={camera.role}
-                          onValueChange={(value) => updateCameraRole(camera.id, value as "entry" | "exit" | "live" | "none")}
+                          onValueChange={(value) => updateCameraRole(camera.id, value as "entry" | "exit" | "live" | "background-entry" | "background-exit" | "none")}
                         >
                           <SelectTrigger id={`camera-${camera.id}`}>
                             <SelectValue placeholder="Select role" />
                           </SelectTrigger>
                           <SelectContent>
                             <SelectItem value="none">Not Assigned</SelectItem>
-                            <SelectItem value="entry">Entry Camera</SelectItem>
-                            <SelectItem value="exit">Exit Camera</SelectItem>
+                            <SelectItem value="entry">Entry Camera (with boxes)</SelectItem>
+                            <SelectItem value="exit">Exit Camera (with boxes)</SelectItem>
+                            <SelectItem value="background-entry">Background Entry (clean video)</SelectItem>
+                            <SelectItem value="background-exit">Background Exit (clean video)</SelectItem>
                             <SelectItem value="live">Live View (No Detection)</SelectItem>
                           </SelectContent>
                         </Select>
@@ -459,8 +465,10 @@ export default function AdminSettings() {
                   Camera Role Information
                 </h4>
                 <ul className="text-sm text-muted-foreground space-y-1">
-                  <li>• <strong>Entry Camera:</strong> Monitors people entering the facility (with AI detection)</li>
-                  <li>• <strong>Exit Camera:</strong> Monitors people leaving the facility (with AI detection)</li>
+                  <li>• <strong>Entry Camera:</strong> Monitors people entering - shows detection boxes on video and logs as entry</li>
+                  <li>• <strong>Exit Camera:</strong> Monitors people leaving - shows detection boxes on video and logs as exit</li>
+                  <li>• <strong>Background Entry:</strong> Clean video with silent detection - logs as entry without showing boxes (smooth video)</li>
+                  <li>• <strong>Background Exit:</strong> Clean video with silent detection - logs as exit without showing boxes (smooth video)</li>
                   <li>• <strong>Live View:</strong> Shows raw video feed without AI detection or attendance tracking</li>
                   <li>• <strong>Not Assigned:</strong> Camera is active but not assigned to entry/exit tracking</li>
                 </ul>
